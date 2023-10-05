@@ -1,7 +1,7 @@
 mod ctrutils;
 use ctrutils::{CiaFile, NcchHdr, CiaContent, CiaReader, gen_iv};
 
-use std::{fs::File, path::Path, io::{Seek, Read, SeekFrom}, env};
+use std::{fs::File, path::Path, io::{Seek, Read, SeekFrom, Write}, env};
 
 use libaes::Cipher;
 use hex_literal::hex;
@@ -26,6 +26,14 @@ const NCSD_PARTITIONS: [&str; 8] = [
     "UpdateData"
 ];
 
+const MEDIA_UNIT_SIZE: u32 = 512;
+
+enum NcchSection {
+    ExHeader = 1,
+    ExeFS = 2,
+    RomFS = 3
+}
+
 fn align(x: u64, y: u64) -> u64 {
     let mask: u64 = !(y - 1);
     (x + (y - 1)) & mask
@@ -39,6 +47,30 @@ fn flag_to_bool(flag: u8) -> bool {
     }
 }
 
+fn get_ncch_aes_counter(hdr: &NcchHdr, section: NcchSection) -> [u8; 16] {
+    let mut counter: [u8; 16] = [0; 16];
+    if hdr.formatversion == 2 || hdr.formatversion == 0 {
+        let mut titleid: [u8; 8] = hdr.titleid;
+        titleid.reverse();
+        counter[0..8].copy_from_slice(&titleid);
+        counter[8] = section as u8;
+    
+    } else if hdr.formatversion == 1 {
+        let x = match section {
+            NcchSection::ExHeader => 512,
+            NcchSection::ExeFS => hdr.exefsoffset * MEDIA_UNIT_SIZE,
+            NcchSection::RomFS => hdr.romfsoffset * MEDIA_UNIT_SIZE
+        };
+
+        counter[0..8].copy_from_slice(&hdr.titleid);
+        for i in 0..4 {
+            counter[12 + i] = (x >> ((3 - i) * 8) & 255) as u8
+        }
+    }
+
+    counter
+}
+
 fn decrypt(key: &[u8; 16], iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
     let mut aes = Cipher::new_128(key);
     aes.set_auto_padding(false);
@@ -46,14 +78,14 @@ fn decrypt(key: &[u8; 16], iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
     aes.cbc_decrypt(iv, data)
 }
 
-fn parse_ncch(mut cia: CiaReader, csize: u64, mut titleid: [u8; 8], from_ncsd: bool) {
+fn parse_ncch(mut cia: CiaReader, mut titleid: [u8; 8], from_ncsd: bool) {
     println!("Parsing NCCH: {}", cia.cidx);
     cia.seek(0);
-    let tmp: [u8; 512] = cia.read::<512>();
+    let mut tmp: [u8; 512] = cia.read::<512>();
     let header: NcchHdr = unsafe { std::mem::transmute(tmp) };
 
     if titleid.iter().all(|&x| x == 0) {
-        titleid = header.programid.clone();
+        titleid = header.programid;
         titleid.reverse();
     }
     
@@ -97,8 +129,25 @@ fn parse_ncch(mut cia: CiaReader, csize: u64, mut titleid: [u8; 8], from_ncsd: b
             base, 
             if from_ncsd { NCSD_PARTITIONS[cia.cidx as usize].to_string() } else { cia.cidx.to_string() }
         );
-
     
+    let mut ncch: File = File::create(base).unwrap();
+    tmp[399] = tmp[399] & 2 | 4;
+    ncch.write_all(&tmp).unwrap();
+
+    if header.exhdrsize != 0 {
+        let counter = get_ncch_aes_counter(&header, NcchSection::ExHeader);
+        // ...
+    }
+
+    if header.exefssize != 0 {
+        let counter = get_ncch_aes_counter(&header, NcchSection::ExeFS);
+        // ...
+    }
+
+    if header.romfssize != 0 {
+        let counter = get_ncch_aes_counter(&header, NcchSection::RomFS);
+        // ...
+    }
 }
 
 fn parse_cia(mut romfile: File, filename: String) {
@@ -169,8 +218,8 @@ fn parse_cia(mut romfile: File, filename: String) {
             {
                 romfile.seek(SeekFrom::Start(contentoffs + next_content_offs)).unwrap();
                 let cia_handle = CiaReader::new(romfile.try_clone().unwrap(), cenc, filename.clone(), titkey, content.cidx, contentoffs + next_content_offs);
-                next_content_offs = next_content_offs + align(content.csize, 64);
-                parse_ncch(cia_handle, content.csize, tid[0..8].try_into().unwrap(), false);
+                next_content_offs += align(content.csize, 64);
+                parse_ncch(cia_handle, tid[0..8].try_into().unwrap(), false);
             } else { println!("CIA content can't be parsed, skipping partition") }
             Err(_) => println!("CIA content can't be parsed, skipping partition")
         }

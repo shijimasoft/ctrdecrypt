@@ -16,19 +16,19 @@ pub struct NcchHdr {
     logohash: [u8; 32],
     pub productcode: [u8; 16],
     exhdrhash: [u8; 32],
-    exhdrsize: u32,
+    pub exhdrsize: u32,
     padding2: u32,
     pub flags: [u8; 8],
     plainregionoffset: u32,
     plainregionsize: u32,
     logooffset: u32,
     logosize: u32,
-    exefsoffset: u32,
-    exefssize: u32,
+    pub exefsoffset: u32,
+    pub exefssize: u32,
     exefshashsize: u32,
     padding4: u32,
-    romfsoffset: u32,
-    romfssize: u32,
+    pub romfsoffset: u32,
+    pub romfssize: u32,
     romfshashsize: u32,
     padding5: u32,
     exefshash: [u8; 32],
@@ -59,14 +59,14 @@ pub fn gen_iv(cidx: u16) -> [u8; 16] {
     let mut iv: [u8; 16] = [0; 16];
     iv[0..2].copy_from_slice(&u16::to_be_bytes(cidx));
 
-    return iv;
+    iv
 }
 
 pub struct CiaReader {
-    fhandle: File,
+    pub fhandle: File,
     encrypted: bool,
     pub name: String,
-    key: [u8; 16],
+    pub key: [u8; 16],
     pub cidx: u16,
     iv: [u8; 16],
     contentoff: u64,
@@ -103,11 +103,11 @@ impl CiaReader {
     pub fn read<const BYTES: usize>(&mut self) -> [u8; BYTES] {
         let mut data: [u8; BYTES] = [0; BYTES];
         self.fhandle.read_exact(&mut data).unwrap();
-
-        if self.encrypted {
-            data = self.cipher.cbc_decrypt(&self.iv, &mut data).try_into().unwrap();
-        }
         
-        return data;
+        if self.encrypted {
+            data = self.cipher.cbc_decrypt(&self.iv, &data).try_into().unwrap();
+        }
+
+        data
     }
 }
