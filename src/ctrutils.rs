@@ -10,7 +10,7 @@ pub struct NcchHdr {
     makercode: u16,
     pub formatversion: u8,
     formatversion2: u8,
-    seedcheck: [u8; 4],
+    pub seedcheck: [u8; 4],
     pub programid: [u8; 8],
     padding1: [u8; 16],
     logohash: [u8; 32],

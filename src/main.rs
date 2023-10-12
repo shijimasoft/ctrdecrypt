@@ -1,7 +1,7 @@
 mod ctrutils;
 use ctrutils::{CiaFile, NcchHdr, CiaContent, CiaReader, gen_iv};
 
-use std::{fs::File, path::Path, io::{Seek, Read, SeekFrom, Write}, env};
+use std::{fs::File, path::Path, io::{Seek, Read, SeekFrom, Write}, env, collections::HashMap};
 
 use libaes::Cipher;
 use hex_literal::hex;
@@ -71,6 +71,55 @@ fn get_ncch_aes_counter(hdr: &NcchHdr, section: NcchSection) -> [u8; 16] {
     counter
 }
 
+fn get_new_key(key_y: u128, header: &NcchHdr, titleid: String) -> u128 {
+    let mut new_key: u128 = 0;
+    let mut seeds: HashMap<String, [u8; 16]> = HashMap::new();
+    let db_path = Path::new("seeddb.bin");
+
+    let mut seeddb = File::open(db_path).unwrap();
+    let mut cbuffer: [u8; 4] = [0; 4];
+    let mut kbuffer: [u8; 8] = [0; 8];
+    let mut sbuffer: [u8; 16] = [0; 16];
+
+    // Check into seeddb.bin
+    if db_path.exists() {
+        seeddb.read_exact(&mut cbuffer).unwrap();
+        let seed_count = u32::from_le_bytes(cbuffer);
+        println!("Seed count: {}", seed_count);
+        seeddb.seek(SeekFrom::Current(12)).unwrap();
+        
+        for _ in 0..seed_count {
+            seeddb.read_exact(&mut kbuffer).unwrap();
+            kbuffer.reverse();
+            let key = hex::encode(kbuffer);
+            seeddb.read_exact(&mut sbuffer).unwrap();
+            seeds.insert(key, sbuffer);
+            seeddb.seek(SeekFrom::Current(8)).unwrap();
+        }
+    }
+
+
+    // TODO: Check into Nintendo's servers
+    // ...
+    if !seeds.contains_key(&titleid) {
+        println!("TODO: Check seed from Nintendo's servers");
+    }
+
+    if seeds.contains_key(&titleid) {
+        let seed_check = u32::from_be_bytes(header.seedcheck);
+        let mut revtid = hex::decode(&titleid).unwrap();
+        revtid.reverse();
+        let sha_sum = sha256::digest([seeds[&titleid].to_vec(), revtid].concat());
+
+        if u32::from_be_bytes(hex::decode(sha_sum.get(0..8).unwrap()).unwrap().try_into().unwrap()) == seed_check {
+            let keystr = sha256::digest([u128::to_be_bytes(key_y), seeds[&titleid]].concat());
+            new_key = u128::from_be_bytes(hex::decode(keystr.get(0..32).unwrap()).unwrap().try_into().unwrap());
+        }
+    }
+
+    new_key
+}
+
 fn decrypt(key: &[u8; 16], iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
     let mut aes = Cipher::new_128(key);
     aes.set_auto_padding(false);
@@ -116,11 +165,11 @@ fn parse_ncch(mut cia: CiaReader, mut titleid: [u8; 8], from_ncsd: bool) {
     }
 
     let use_seed_crypto: bool = (header.flags[7] & 32) != 0;
-    let _key_y = ncch_key_y;
+    let mut key_y = ncch_key_y;
 
     if use_seed_crypto {
-        // TODO: FW > 9.6 seed system implementation (only eShop games)
-        println!("TODO: Uses 9.6 NCCH Seed crypto with KeyY: {:032X}", _key_y);
+        println!("Uses 9.6 NCCH Seed crypto with KeyY: {:032X}", key_y);
+        key_y = get_new_key(ncch_key_y, &header, hex::encode(titleid));
     }
 
     let mut base: String = cia.name.strip_suffix(".cia").unwrap().to_string();
