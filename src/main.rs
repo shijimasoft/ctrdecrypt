@@ -76,26 +76,28 @@ fn get_new_key(key_y: u128, header: &NcchHdr, titleid: String) -> u128 {
     let mut seeds: HashMap<String, [u8; 16]> = HashMap::new();
     let db_path = Path::new("seeddb.bin");
 
-    let mut seeddb = File::open(db_path).unwrap();
+    let seeddb = File::open(db_path);
     let mut cbuffer: [u8; 4] = [0; 4];
     let mut kbuffer: [u8; 8] = [0; 8];
     let mut sbuffer: [u8; 16] = [0; 16];
 
     // Check into seeddb.bin
-    if db_path.exists() {
-        seeddb.read_exact(&mut cbuffer).unwrap();
-        let seed_count = u32::from_le_bytes(cbuffer);
-        println!("Seed count: {}", seed_count);
-        seeddb.seek(SeekFrom::Current(12)).unwrap();
-        
-        for _ in 0..seed_count {
-            seeddb.read_exact(&mut kbuffer).unwrap();
-            kbuffer.reverse();
-            let key = hex::encode(kbuffer);
-            seeddb.read_exact(&mut sbuffer).unwrap();
-            seeds.insert(key, sbuffer);
-            seeddb.seek(SeekFrom::Current(8)).unwrap();
+    match seeddb {
+        Ok(mut seeddb) => {
+            seeddb.read_exact(&mut cbuffer).unwrap();
+            let seed_count = u32::from_le_bytes(cbuffer);
+            seeddb.seek(SeekFrom::Current(12)).unwrap();
+            
+            for _ in 0..seed_count {
+                seeddb.read_exact(&mut kbuffer).unwrap();
+                kbuffer.reverse();
+                let key = hex::encode(kbuffer);
+                seeddb.read_exact(&mut sbuffer).unwrap();
+                seeds.insert(key, sbuffer);
+                seeddb.seek(SeekFrom::Current(8)).unwrap();
+            }
         }
+        Err(_) => println!("seeddb.bin not found, trying to connect to Nintendo servers...")
     }
 
 
