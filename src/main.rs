@@ -115,7 +115,6 @@ fn get_new_key(key_y: u128, header: &NcchHdr, titleid: String) -> u128 {
                 break;
             }
         }
-        println!("TODO: Check seed from Nintendo's servers");
     }
 
     if seeds.contains_key(&titleid) {
