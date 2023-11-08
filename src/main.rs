@@ -100,10 +100,21 @@ fn get_new_key(key_y: u128, header: &NcchHdr, titleid: String) -> u128 {
         Err(_) => println!("seeddb.bin not found, trying to connect to Nintendo servers...")
     }
 
-
-    // TODO: Check into Nintendo's servers
-    // ...
+    // Check into Nintendo's servers
     if !seeds.contains_key(&titleid) {
+        println!("\t********************************");
+        println!("\tCouldn't find seed in seeddb, checking online...");
+        println!("\t********************************");
+        for country in ["JP", "US", "GB", "KR", "TW", "AU", "NZ"] {
+            let req = attohttpc::get(format!("https://kagiya-ctr.cdn.nintendo.net/title/0x{}/ext_key?country={}", titleid, country))
+                .send()
+                .unwrap();
+            if req.is_success() {
+                let bytes = req.text().unwrap();
+                seeds.insert(titleid.clone(), hex::decode(bytes).unwrap().try_into().unwrap());
+                break;
+            }
+        }
         println!("TODO: Check seed from Nintendo's servers");
     }
 
