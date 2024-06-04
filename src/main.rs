@@ -176,15 +176,19 @@ fn dump_section(ncch: &mut File, cia: &mut CiaReader, offset: u64, size: u32, se
 
                 for i in 0usize..10 {
                     let exeinfo: ExeInfo = unsafe { std::mem::transmute(&exetmp[i * 16..(i + 1) * 16]) };
-                    let fname = std::str::from_utf8(&exeinfo.fname).unwrap().trim_end_matches(char::from(0));
                     
                     let mut off = u32::from_le_bytes(exeinfo.off) as usize;
                     let size = u32::from_le_bytes(exeinfo.size) as usize;
                     off += 512;
-                    if exeinfo.fname.is_ascii() {
-                        if fname == "icon" || fname == "banner" {
-                            exetmp.splice(off..(off + size), exetmp2[off..off + size].iter().cloned());
+                    
+                    match std::str::from_utf8(&exeinfo.fname) {
+                        Ok(fname) => if fname.is_ascii()
+                        {
+                            if ["icon", "banner"].contains(&fname.trim_end_matches(char::from(0))) {
+                                exetmp.splice(off..(off + size), exetmp2[off..off + size].iter().cloned());
+                            }
                         }
+                        Err(_) => ()
                     }
                 }
             }
