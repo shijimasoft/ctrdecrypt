@@ -8,6 +8,9 @@ edition = "2021"
 [dependencies]
 hex = "0.4.3"
 hex-literal="0.3.3"
-libaes = "0.7.0"
+aes = "0.8.4"
+cbc = {version ="0.1.2", features = ["std"]}
 sha256 = "1.4.0"
-attohttpc = "0.26.1"
+attohttpc = "0.28.0"
+block-padding = "0.3.3"
+ctr = "0.9.2"
