@@ -1,9 +1,9 @@
 mod ctrutils;
-use ctrutils::{CiaFile, NcchHdr, CiaContent, CiaReader, gen_iv};
+use ctrutils::{cbc_decrypt, gen_iv, CiaContent, CiaFile, CiaReader, NcchHdr};
+use aes::{cipher::{KeyIvInit, StreamCipher}, Aes128};
 
-use std::{fs::File, path::Path, io::{Seek, Read, SeekFrom, Write}, env, collections::HashMap};
+use std::{collections::HashMap, env, fs::File, io::{Read, Seek, SeekFrom, Write}, path::Path, usize, vec};
 
-use libaes::Cipher;
 use hex_literal::hex;
 
 const CMNKEYS: [[u8; 16]; 6] = [
@@ -14,6 +14,15 @@ const CMNKEYS: [[u8; 16]; 6] = [
     hex!("7ada22caffc476cc8297a0c7ceeeeebe"),
     hex!("a5051ca1b37dcf3afbcf8cc1edd9ce02")
 ];
+
+const KEY_0X2C: u128 = 246647523836745093481291640204864831571;
+const KEY_0X25: u128 = 275024782269591852539264289417494026995;
+const KEY_0X18: u128 = 174013536497093865167571429864564540276;
+const KEY_0X1B: u128 = 92615092018138441822550407327763030402;
+const FIXED_SYS: u128 = 109645209274529458878270608689136408907;
+
+const KEYS_0: [u128; 4] = [KEY_0X2C, KEY_0X25, KEY_0X18, KEY_0X1B];
+const KEYS_1: [u128; 2] = [0, FIXED_SYS];
 
 const NCSD_PARTITIONS: [&str; 8] = [
     "Main",
@@ -28,6 +37,8 @@ const NCSD_PARTITIONS: [&str; 8] = [
 
 const MEDIA_UNIT_SIZE: u32 = 512;
 
+pub type Aes128Ctr = ctr::Ctr128BE<Aes128>;
+
 enum NcchSection {
     ExHeader = 1,
     ExeFS = 2,
@@ -41,9 +52,8 @@ fn align(x: u64, y: u64) -> u64 {
 
 fn flag_to_bool(flag: u8) -> bool {
     match flag {
-        1 => true,
-        0 => false,
-        _ => panic!("Invalid crypto flag")
+        1..=u8::MAX => true,
+        0 => false
     }
 }
 
@@ -69,6 +79,141 @@ fn get_ncch_aes_counter(hdr: &NcchHdr, section: NcchSection) -> [u8; 16] {
     }
 
     counter
+}
+
+fn scramblekey(key_x: u128, key_y: u128) -> u128 {
+    const MAX_BITS: u32 = 128;
+    const MASK: u128 = u128::MAX;
+
+    let rol = |val: u128, r_bits: u32| -> u128 {
+        let r_bits = r_bits % MAX_BITS; // Ensure the shift is within bounds
+        (val << r_bits) | (val >> (MAX_BITS - r_bits))
+    };
+
+    let value = (rol(key_x, 2) ^ key_y) + (42503689118608475533858958821215598218 & MASK);
+    rol(value, 87)
+}
+
+fn dump_section(ncch: &mut File, cia: &mut CiaReader, offset: u64, size: u32, sec_type: NcchSection, sec_idx: usize, ctr: [u8; 16], uses_extra_crypto: u8, fixed_crypto: u8, encrypted: bool, keyys: [u128; 2]) {
+    let sections = ["ExHeader", "ExeFS", "RomFS"];
+    const CHUNK: u32 = 4194304; // 4 MiB
+    println!("  {} offset: {:08X}", sections[sec_idx], offset);
+    println!("  {} counter: {}", sections[sec_idx], hex::encode(&ctr));
+    println!("  {} size: {} bytes", sections[sec_idx], size);
+
+    // Prevent integer overflow
+    match offset.checked_sub(ncch.stream_position().unwrap()) {
+        Some(tmp) => {
+            if tmp > 0 {
+                let mut buf = vec![0u8; tmp as usize];
+                cia.read(&mut buf);
+                ncch.write_all(&buf).unwrap();
+            }
+        }
+        None => ()
+    }
+
+    if !encrypted {
+        let mut sizeleft = size;
+        let mut buf = vec![0u8; CHUNK as usize];
+
+        while sizeleft > CHUNK {
+            cia.read(&mut buf);
+            ncch.write_all(&buf).unwrap();
+            sizeleft -= CHUNK;
+        }
+        
+        if sizeleft > 0 {
+            buf = vec![0u8; sizeleft as usize];
+            cia.read(&mut buf);
+            ncch.write_all(&buf).unwrap();
+        }
+        return;
+    }
+    
+    let key_0x2c = u128::to_be_bytes(scramblekey(KEYS_0[0], keyys[0]));
+    let get_crypto_key = |extra_crypto: &u8| -> usize { match extra_crypto { 0 => 0, 1 => 1, 10 => 2, 11 => 3, _ => 0 }};
+
+    match sec_type {
+        NcchSection::ExHeader => {
+            let mut key = key_0x2c;
+            if flag_to_bool(fixed_crypto) {
+                key = u128::to_be_bytes(KEYS_1[(fixed_crypto as usize)- 1]);
+            }
+            let mut buf = vec![0u8; size as usize];
+            cia.read(&mut buf);
+            Aes128Ctr::new_from_slices(&key, &ctr)
+                .unwrap()
+                .apply_keystream(&mut buf);
+            ncch.write_all(&buf).unwrap();
+        }
+        NcchSection::ExeFS => {
+            let mut key = key_0x2c;
+            if flag_to_bool(fixed_crypto) {
+                key = u128::to_be_bytes(KEYS_1[(fixed_crypto as usize)- 1]);
+            }
+            let mut exedata = vec![0u8; size as usize];
+            cia.read(&mut exedata);
+            let mut exetmp = exedata.clone();
+            Aes128Ctr::new_from_slices(&key, &ctr)
+                .unwrap()
+                .apply_keystream(&mut exetmp);
+
+            // Extra crypto condition is not tested yet
+            if flag_to_bool(uses_extra_crypto) {
+                let mut exetmp2 = exedata;
+                key = u128::to_be_bytes(scramblekey(KEYS_0[get_crypto_key(&uses_extra_crypto)], keyys[1]));
+                Aes128Ctr::new_from_slices(&key, &ctr)
+                    .unwrap()
+                    .apply_keystream(&mut exetmp2);
+                
+                #[repr(C)]
+                struct ExeInfo {
+                    fname: [u8; 8],
+                    off: [u8; 4],
+                    size: [u8; 4],
+                }
+
+                for i in 0usize..10 {
+                    let exeinfo: ExeInfo = unsafe { std::mem::transmute(&exetmp[i * 16..(i + 1) * 16]) };
+                    let fname = std::str::from_utf8(&exeinfo.fname).unwrap().trim_end_matches(char::from(0));
+                    
+                    let mut off = u32::from_le_bytes(exeinfo.off) as usize;
+                    let size = u32::from_le_bytes(exeinfo.size) as usize;
+                    off += 512;
+                    if exeinfo.fname.is_ascii() {
+                        if fname == "icon" || fname == "banner" {
+                            exetmp.splice(off..(off + size), exetmp2[off..off + size].iter().cloned());
+                        }
+                    }
+                }
+            }
+            ncch.write_all(&exetmp).unwrap();
+        }
+        NcchSection::RomFS => {
+            let mut key = u128::to_be_bytes(scramblekey(KEYS_0[get_crypto_key(&uses_extra_crypto)], keyys[1]));
+            if flag_to_bool(fixed_crypto) {
+                key = u128::to_be_bytes(KEYS_1[(fixed_crypto as usize) - 1]);
+            }
+            let mut sizeleft = size;
+            let mut buf = vec![0u8; CHUNK as usize];
+            let mut ctr_cipher = Aes128Ctr::new_from_slices(&key, &ctr).unwrap();
+            
+            while sizeleft > CHUNK {
+                cia.read(&mut buf);
+                ctr_cipher.apply_keystream(&mut buf);  
+                ncch.write_all(&buf).unwrap();
+                sizeleft -= CHUNK;
+            }
+
+            if sizeleft > 0 {
+                buf = vec![0u8; sizeleft as usize];
+                cia.read(&mut buf);
+                ctr_cipher.apply_keystream(&mut buf);
+                ncch.write_all(&buf).unwrap();
+            }
+        }
+    }
 }
 
 fn get_new_key(key_y: u128, header: &NcchHdr, titleid: String) -> u128 {
@@ -132,38 +277,33 @@ fn get_new_key(key_y: u128, header: &NcchHdr, titleid: String) -> u128 {
     new_key
 }
 
-fn decrypt(key: &[u8; 16], iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
-    let mut aes = Cipher::new_128(key);
-    aes.set_auto_padding(false);
-
-    aes.cbc_decrypt(iv, data)
-}
-
 fn parse_ncch(mut cia: CiaReader, mut titleid: [u8; 8], from_ncsd: bool) {
     println!("Parsing NCCH: {}", cia.cidx);
     cia.seek(0);
-    let mut tmp: [u8; 512] = cia.read::<512>();
-    let header: NcchHdr = unsafe { std::mem::transmute(tmp) };
-
+    let mut tmp = [0u8; 512];
+    cia.read(&mut tmp);
+    let mut header: NcchHdr = unsafe { std::mem::transmute(tmp) };
     if titleid.iter().all(|&x| x == 0) {
         titleid = header.programid;
         titleid.reverse();
     }
-    
+
     let ncch_key_y = u128::from_be_bytes(header.signature[0..16].try_into().unwrap());
     
     println!("  Product code: {}", std::str::from_utf8(&header.productcode).unwrap());
     println!("  KeyY: {:032X}", ncch_key_y);
-    println!("  Title ID: {}", hex::encode(titleid).to_uppercase());
-    println!("  Format version: {}", header.formatversion);
+    header.titleid.reverse();
+    println!("  Title ID: {}", hex::encode(header.titleid).to_uppercase());
+    header.titleid.reverse();
+    println!("  Format version: {}\n", header.formatversion);
 
-    let uses_extra_crypto: bool = flag_to_bool(header.flags[3]);
+    let uses_extra_crypto: u8 = header.flags[3];
 
-    if uses_extra_crypto {
+    if flag_to_bool(uses_extra_crypto) {
         println!("  Uses extra NCCH crypto, keyslot 0x25");
     }
     
-    let fixed_crypto: u8;
+    let mut fixed_crypto: u8 = 0;
     let mut encrypted: bool = true;
 
     if flag_to_bool(header.flags[7] & 1) {
@@ -180,10 +320,9 @@ fn parse_ncch(mut cia: CiaReader, mut titleid: [u8; 8], from_ncsd: bool) {
     let mut key_y = ncch_key_y;
 
     if use_seed_crypto {
-        println!("Uses 9.6 NCCH Seed crypto with KeyY: {:032X}", key_y);
         key_y = get_new_key(ncch_key_y, &header, hex::encode(titleid));
+        println!("Uses 9.6 NCCH Seed crypto with KeyY: {:032X}", key_y);
     }
-
     let mut base: String = cia.name.strip_suffix(".cia").unwrap().to_string();
     base = format!("{}/{}.{}.ncch",
             env::current_dir().unwrap().to_str().unwrap(),
@@ -195,19 +334,20 @@ fn parse_ncch(mut cia: CiaReader, mut titleid: [u8; 8], from_ncsd: bool) {
     tmp[399] = tmp[399] & 2 | 4;
     ncch.write_all(&tmp).unwrap();
 
+    let mut counter: [u8; 16];
     if header.exhdrsize != 0 {
-        let counter = get_ncch_aes_counter(&header, NcchSection::ExHeader);
-        // ...
+        counter = get_ncch_aes_counter(&header, NcchSection::ExHeader);
+        dump_section(&mut ncch, &mut cia, 512, header.exhdrsize * 2, NcchSection::ExHeader, 0, counter, uses_extra_crypto, fixed_crypto, encrypted, [ncch_key_y, key_y]);
     }
 
     if header.exefssize != 0 {
-        let counter = get_ncch_aes_counter(&header, NcchSection::ExeFS);
-        // ...
+        counter = get_ncch_aes_counter(&header, NcchSection::ExeFS);
+        dump_section(&mut ncch, &mut cia, (header.exefsoffset * MEDIA_UNIT_SIZE) as u64, header.exefssize * MEDIA_UNIT_SIZE, NcchSection::ExeFS, 1, counter, uses_extra_crypto, fixed_crypto, encrypted, [ncch_key_y, key_y]);
     }
 
     if header.romfssize != 0 {
-        let counter = get_ncch_aes_counter(&header, NcchSection::RomFS);
-        // ...
+        counter = get_ncch_aes_counter(&header, NcchSection::RomFS);
+        dump_section(&mut ncch, &mut cia, (header.romfsoffset * MEDIA_UNIT_SIZE) as u64, header.romfssize * MEDIA_UNIT_SIZE, NcchSection::RomFS, 2, counter, uses_extra_crypto, fixed_crypto, encrypted, [ncch_key_y, key_y]);
     }
 }
 
@@ -233,15 +373,13 @@ fn parse_cia(mut romfile: File, filename: String) {
         println!("Unsupported CIA file");
         return
     }
-    
+
     romfile.seek(SeekFrom::Start((tikoff + 177 + 320) as u64)).unwrap();
     let mut cmnkeyidx: u8 = 0;
     romfile.read_exact(std::slice::from_mut(&mut cmnkeyidx)).unwrap();
 
-    let titkey: [u8; 16] = decrypt(&CMNKEYS[cmnkeyidx as usize], &tid,&enckey)
-        .as_slice()
-        .try_into()
-        .unwrap();
+    cbc_decrypt(&CMNKEYS[cmnkeyidx as usize], &tid,&mut enckey);
+    let titkey = enckey;
 
     romfile.seek(SeekFrom::Start((tmdoff + 518) as u64)).unwrap();
     let mut content_count: [u8; 2] = [0; 2];
@@ -259,7 +397,7 @@ fn parse_cia(mut romfile: File, filename: String) {
             ctype: u16::from_be_bytes(cbuffer[6..8].try_into().unwrap()),
             csize: u64::from_be_bytes(cbuffer[8..16].try_into().unwrap())
         };
-        
+
         let cenc: bool = (content.ctype & 1) != 0;
 
         romfile.seek(SeekFrom::Start((contentoffs + next_content_offs) as u64)).unwrap();
@@ -270,8 +408,8 @@ fn parse_cia(mut romfile: File, filename: String) {
         let iv: [u8; 16] = gen_iv(content.cidx);
         
         if cenc {
-            let testdec: Vec<u8> = decrypt(&titkey, &iv, &test);
-            search = testdec[256..260].try_into().unwrap();
+            cbc_decrypt(&titkey, &iv, &mut test);
+            search = test[256..260].try_into().unwrap();
         }
 
         match std::str::from_utf8(&search) {
@@ -302,7 +440,7 @@ fn main() {
     if args[1].ends_with(".cia") {
         let mut check: [u8; 4] = [0; 4];
         rom.read_exact(&mut check).unwrap();
-    
+
         if check[2..4] == [0, 0] { parse_cia(rom, args[1].to_string()) }
     
     }

@@ -1,5 +1,23 @@
 use std::{fs::File, io::{Seek, SeekFrom, Read}};
-use libaes::Cipher;
+
+use aes::{cipher::{BlockDecryptMut, KeyIvInit}, Aes128};
+use block_padding::NoPadding;
+
+pub type Aes128Cbc = cbc::Decryptor<Aes128>;
+
+pub fn gen_iv(cidx: u16) -> [u8; 16] {
+    let mut iv: [u8; 16] = [0; 16];
+    iv[0..2].copy_from_slice(&u16::to_be_bytes(cidx));
+
+    iv
+}
+
+pub fn cbc_decrypt(key: &[u8; 16], iv: &[u8; 16], data: &mut [u8]) {
+    Aes128Cbc::new_from_slices(key, iv)
+        .unwrap()
+        .decrypt_padded_mut::<NoPadding>(data)
+        .unwrap();
+}
 
 #[repr(C)]
 pub struct NcchHdr {
@@ -55,13 +73,6 @@ pub struct CiaContent {
     pub csize: u64,
 }
 
-pub fn gen_iv(cidx: u16) -> [u8; 16] {
-    let mut iv: [u8; 16] = [0; 16];
-    iv[0..2].copy_from_slice(&u16::to_be_bytes(cidx));
-
-    iv
-}
-
 pub struct CiaReader {
     pub fhandle: File,
     encrypted: bool,
@@ -70,14 +81,11 @@ pub struct CiaReader {
     pub cidx: u16,
     iv: [u8; 16],
     contentoff: u64,
-    cipher: Cipher
+    last_enc_block: u128,
 }
 
 impl CiaReader {
     pub fn new(fhandle: File, encrypted: bool, name: String, key: [u8; 16], cidx: u16, contentoff: u64) -> CiaReader {
-        let mut cipher = Cipher::new_128(&key);
-        cipher.set_auto_padding(false);
-
         CiaReader {
             fhandle,
             encrypted,
@@ -86,7 +94,7 @@ impl CiaReader {
             cidx,
             iv: gen_iv(cidx),
             contentoff,
-            cipher
+            last_enc_block: 0
         }
     }
 
@@ -100,14 +108,17 @@ impl CiaReader {
         }
     }
 
-    pub fn read<const BYTES: usize>(&mut self) -> [u8; BYTES] {
-        let mut data: [u8; BYTES] = [0; BYTES];
-        self.fhandle.read_exact(&mut data).unwrap();
-        
+    pub fn read(&mut self, data: &mut [u8]) {
+        self.fhandle.read_exact(data).unwrap();
         if self.encrypted {
-            data = self.cipher.cbc_decrypt(&self.iv, &data).try_into().unwrap();
+            let last_enc_block = u128::from_be_bytes(data[(data.len() - 16)..].try_into().unwrap());
+            cbc_decrypt(&self.key, &self.iv, data);
+            let first_dec_block = u128::from_be_bytes(data[0..16].try_into().unwrap());
+            
+            // XOR the last encrypted block with the first decrypted block
+            let xored_block = u128::to_be_bytes(first_dec_block ^ self.last_enc_block);
+            data[0..16].copy_from_slice(&xored_block);
+            self.last_enc_block = last_enc_block;
         }
-
-        data
     }
 }
