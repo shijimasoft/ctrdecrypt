@@ -1,6 +1,7 @@
 mod ctrutils;
-use byteorder::{ByteOrder, BigEndian, LittleEndian, ReadBytesExt};
 use ctrutils::{cbc_decrypt, gen_iv, CiaContent, CiaFile, CiaReader, NcchHdr};
+
+use byteorder::{ByteOrder, BigEndian, LittleEndian, ReadBytesExt};
 use aes::{cipher::{KeyIvInit, StreamCipher}, Aes128};
 
 use std::{collections::HashMap, env, fs::File, io::{Read, Seek, SeekFrom, Write, Cursor}, path::Path, usize, vec};
@@ -414,9 +415,9 @@ fn parse_cia(mut romfile: File, filename: String) {
         let cenc: bool = (content.ctype & 1) != 0;
 
         romfile.seek(SeekFrom::Start((contentoffs + next_content_offs) as u64)).unwrap();
-        let mut test: [u8; 512] = [0; 512];
-        let mut search: [u8; 4] = test[256..260].try_into().unwrap(); 
+        let mut test: [u8; 512] = [0; 512]; 
         romfile.read_exact(&mut test).unwrap();
+        let mut search: [u8; 4] = test[256..260].try_into().unwrap();
 
         let iv: [u8; 16] = gen_iv(content.cidx);
         

@@ -1,5 +1,6 @@
-use std::{fs::File, io::{Seek, SeekFrom, Read}};
+use std::{fs::File, io::{Read, Seek, SeekFrom}};
 
+use byteorder::{ByteOrder, BigEndian};
 use aes::{cipher::{BlockDecryptMut, KeyIvInit}, Aes128};
 use block_padding::NoPadding;
 
@@ -7,7 +8,7 @@ pub type Aes128Cbc = cbc::Decryptor<Aes128>;
 
 pub fn gen_iv(cidx: u16) -> [u8; 16] {
     let mut iv: [u8; 16] = [0; 16];
-    iv[0..2].copy_from_slice(&u16::to_be_bytes(cidx));
+    BigEndian::write_u16(&mut iv[0..2], cidx);
 
     iv
 }
@@ -111,13 +112,14 @@ impl CiaReader {
     pub fn read(&mut self, data: &mut [u8]) {
         self.fhandle.read_exact(data).unwrap();
         if self.encrypted {
-            let last_enc_block = u128::from_be_bytes(data[(data.len() - 16)..].try_into().unwrap());
+            
+            let last_enc_block = BigEndian::read_u128(&data[(data.len() - 16)..]);
             cbc_decrypt(&self.key, &self.iv, data);
-            let first_dec_block = u128::from_be_bytes(data[0..16].try_into().unwrap());
+            let first_dec_block = BigEndian::read_u128(&data[0..16]);
             
             // XOR the last encrypted block with the first decrypted block
-            let xored_block = u128::to_be_bytes(first_dec_block ^ self.last_enc_block);
-            data[0..16].copy_from_slice(&xored_block);
+            BigEndian::write_u128(&mut data[0..16], first_dec_block ^ self.last_enc_block);
+
             self.last_enc_block = last_enc_block;
         }
     }
