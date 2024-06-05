@@ -1,8 +1,9 @@
 mod ctrutils;
+use byteorder::{ByteOrder, BigEndian, LittleEndian, ReadBytesExt};
 use ctrutils::{cbc_decrypt, gen_iv, CiaContent, CiaFile, CiaReader, NcchHdr};
 use aes::{cipher::{KeyIvInit, StreamCipher}, Aes128};
 
-use std::{collections::HashMap, env, fs::File, io::{Read, Seek, SeekFrom, Write}, path::Path, usize, vec};
+use std::{collections::HashMap, env, fs::File, io::{Read, Seek, SeekFrom, Write, Cursor}, path::Path, usize, vec};
 
 use hex_literal::hex;
 
@@ -163,10 +164,11 @@ fn dump_section(ncch: &mut File, cia: &mut CiaReader, offset: u64, size: u32, se
             if flag_to_bool(uses_extra_crypto) {
                 let mut exetmp2 = exedata;
                 key = u128::to_be_bytes(scramblekey(KEYS_0[get_crypto_key(&uses_extra_crypto)], keyys[1]));
+                
                 Aes128Ctr::new_from_slices(&key, &ctr)
                     .unwrap()
                     .apply_keystream(&mut exetmp2);
-                
+
                 #[repr(C)]
                 struct ExeInfo {
                     fname: [u8; 8],
@@ -175,20 +177,26 @@ fn dump_section(ncch: &mut File, cia: &mut CiaReader, offset: u64, size: u32, se
                 }
 
                 for i in 0usize..10 {
-                    let exeinfo: ExeInfo = unsafe { std::mem::transmute(&exetmp[i * 16..(i + 1) * 16]) };
+                    let exebytes = &exetmp[i * 16..(i + 1) * 16];
+                    let exeinfo: ExeInfo = unsafe { std::mem::transmute(LittleEndian::read_u128(exebytes)) };
                     
-                    let mut off = u32::from_le_bytes(exeinfo.off) as usize;
-                    let size = u32::from_le_bytes(exeinfo.size) as usize;
+                    let mut off = LittleEndian::read_u32(&exeinfo.off) as usize;
+                    let size = LittleEndian::read_u32(&exeinfo.size) as usize;
                     off += 512;
-                    
-                    match std::str::from_utf8(&exeinfo.fname) {
-                        Ok(fname) => if fname.is_ascii()
+
+                    match exeinfo.fname.iter().rposition(|&x| x != 0) {
+                        Some(zero_idx) => if exeinfo.fname[..=zero_idx].is_ascii()
                         {
-                            if ["icon", "banner"].contains(&fname.trim_end_matches(char::from(0))) {
+                            // ASCII for 'icon'
+                            let icon: [u8; 4] = hex!("69636f6e");
+                            // ASCII for 'banner'
+                            let banner: [u8; 6] = hex!("62616e6e6572");
+
+                            if !(exeinfo.fname[..=zero_idx] == icon || exeinfo.fname[..=zero_idx] == banner) {
                                 exetmp.splice(off..(off + size), exetmp2[off..off + size].iter().cloned());
                             }
                         }
-                        Err(_) => ()
+                        None => { exetmp.splice(off..(off + size), exetmp2[off..off + size].iter().cloned()); }
                     }
                 }
             }
@@ -234,7 +242,7 @@ fn get_new_key(key_y: u128, header: &NcchHdr, titleid: String) -> u128 {
     match seeddb {
         Ok(mut seeddb) => {
             seeddb.read_exact(&mut cbuffer).unwrap();
-            let seed_count = u32::from_le_bytes(cbuffer);
+            let seed_count = LittleEndian::read_u32(&cbuffer);
             seeddb.seek(SeekFrom::Current(12)).unwrap();
             
             for _ in 0..seed_count {
@@ -267,14 +275,14 @@ fn get_new_key(key_y: u128, header: &NcchHdr, titleid: String) -> u128 {
     }
 
     if seeds.contains_key(&titleid) {
-        let seed_check = u32::from_be_bytes(header.seedcheck);
+        let seed_check = BigEndian::read_u32(&header.seedcheck);
         let mut revtid = hex::decode(&titleid).unwrap();
         revtid.reverse();
         let sha_sum = sha256::digest([seeds[&titleid].to_vec(), revtid].concat());
 
-        if u32::from_be_bytes(hex::decode(sha_sum.get(0..8).unwrap()).unwrap().try_into().unwrap()) == seed_check {
+        if BigEndian::read_u32(&hex::decode(sha_sum.get(0..8).unwrap()).unwrap()) == seed_check {
             let keystr = sha256::digest([u128::to_be_bytes(key_y), seeds[&titleid]].concat());
-            new_key = u128::from_be_bytes(hex::decode(keystr.get(0..32).unwrap()).unwrap().try_into().unwrap());
+            new_key = BigEndian::read_u128(&hex::decode(keystr.get(0..32).unwrap()).unwrap());
         }
     }
 
@@ -292,7 +300,7 @@ fn parse_ncch(mut cia: CiaReader, mut titleid: [u8; 8], from_ncsd: bool) {
         titleid.reverse();
     }
 
-    let ncch_key_y = u128::from_be_bytes(header.signature[0..16].try_into().unwrap());
+    let ncch_key_y = BigEndian::read_u128(header.signature[0..16].try_into().unwrap());
     
     println!("  Product code: {}", std::str::from_utf8(&header.productcode).unwrap());
     println!("  KeyY: {:032X}", ncch_key_y);
@@ -390,16 +398,17 @@ fn parse_cia(mut romfile: File, filename: String) {
     romfile.read_exact(&mut content_count).unwrap();
 
     let mut next_content_offs = 0;
-    for i in 0..u16::from_be_bytes(content_count) {
+    for i in 0..BigEndian::read_u16(&content_count) {
         romfile.seek(SeekFrom::Start(tmdoff + 2820 + (48 * i as u64))).unwrap();
         let mut cbuffer: [u8; 16] = [0; 16];
         romfile.read_exact(&mut cbuffer).unwrap();
 
+        let mut bcursor = Cursor::new(cbuffer);
         let content = CiaContent {
-            cid: u32::from_be_bytes(cbuffer[0..4].try_into().unwrap()),
-            cidx: u16::from_be_bytes(cbuffer[4..6].try_into().unwrap()),
-            ctype: u16::from_be_bytes(cbuffer[6..8].try_into().unwrap()),
-            csize: u64::from_be_bytes(cbuffer[8..16].try_into().unwrap())
+            cid:   bcursor.read_u32::<BigEndian>().unwrap(),
+            cidx:  bcursor.read_u16::<BigEndian>().unwrap(),
+            ctype: bcursor.read_u16::<BigEndian>().unwrap(),
+            csize: bcursor.read_u64::<BigEndian>().unwrap()
         };
 
         let cenc: bool = (content.ctype & 1) != 0;
