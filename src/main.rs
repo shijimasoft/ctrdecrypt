@@ -161,7 +161,6 @@ fn dump_section(ncch: &mut File, cia: &mut CiaReader, offset: u64, size: u32, se
                 .unwrap()
                 .apply_keystream(&mut exetmp);
 
-            // Extra crypto condition is not tested yet
             if flag_to_bool(uses_extra_crypto) {
                 let mut exetmp2 = exedata;
                 key = u128::to_be_bytes(scramblekey(KEYS_0[get_crypto_key(&uses_extra_crypto)], keyys[1]));

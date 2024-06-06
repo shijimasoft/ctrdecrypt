@@ -1,0 +1,27 @@
+name: Windows build
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build
+      run: cargo build --release --verbose
+    - name: Upload a Build Artifact
+      uses: actions/upload-artifact@v4.3.3
+      with:
+        name: ${{ github.event.repository.name }}-release
+        path: target/release/${{ github.event.repository.name }}
+    # - name: Run tests
+    #   run: cargo test --verbose
