@@ -1,0 +1,55 @@
+name: ctrdecrypt build
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Linux build
+      run: |
+        cargo build --release --verbose
+        strip target/release/${{ github.event.repository.name }}
+    - name: Upload Linux artifact
+      uses: actions/upload-artifact@v4.3.3
+      with:
+        name: ${{ github.event.repository.name }}-linux_x86_64-release
+        path: target/release/${{ github.event.repository.name }}
+    # - name: Run tests
+    #   run: cargo test --verbose
+  build:
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: macOS build
+      run: |
+        cargo build --release --verbose
+        strip target/release/${{ github.event.repository.name }}
+    - name: Upload macOS artifact
+      uses: actions/upload-artifact@v4.3.3
+      with:
+        name: ${{ github.event.repository.name }}-macos_arm64-release
+        path: target/release/${{ github.event.repository.name }}
+    # - name: Run tests
+    #   run: cargo test --verbose
+    build:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Windows build
+      run: cargo build --release --verbose
+    - name: Upload Windows artifact
+      uses: actions/upload-artifact@v4.3.3
+      with:
+        name: ${{ github.event.repository.name }}-windows_x86_64-release.exe
+        path: target/release/${{ github.event.repository.name }}.exe
+    # - name: Run tests
+    #   run: cargo test --verbose
