@@ -6,50 +6,31 @@ on:
   pull_request:
     branches: [ "main" ]
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  release:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: ${{ github.event.repository.name }}
+            asset_name: ${{ github.event.repository.name }}-linux-x86_64
+          - os: windows-latest
+            artifact_name: ${{ github.event.repository.name }}.exe
+            asset_name: ${{ github.event.repository.name }}-windows-amd64.exe
+          - os: macos-latest
+            artifact_name: ${{ github.event.repository.name }}
+            asset_name: ${{ github.event.repository.name }}-macos-arm64
+    runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v4
-    - name: Linux build
-      run: |
-        cargo build --release --verbose
-        strip target/release/${{ github.event.repository.name }}
-    - name: Upload Linux artifact
-      uses: actions/upload-artifact@v4.3.3
+    - name: Build release
+      run:
+        cargo build --release
+    - if: ${{ matrix.os }} != 'windows-latest'
+      run:
+        strip target/release/${{ matrix.artifact_name }}
+    - name: Upload artifacts
+    - uses: actions/upload-artifact@v4.3.3
       with:
-        name: ${{ github.event.repository.name }}-linux_x86_64-release
-        path: target/release/${{ github.event.repository.name }}
-    # - name: Run tests
-    #   run: cargo test --verbose
-  build:
-    runs-on: macos-latest
-    steps:
-    - uses: actions/checkout@v4
-    - name: macOS build
-      run: |
-        cargo build --release --verbose
-        strip target/release/${{ github.event.repository.name }}
-    - name: Upload macOS artifact
-      uses: actions/upload-artifact@v4.3.3
-      with:
-        name: ${{ github.event.repository.name }}-macos_arm64-release
-        path: target/release/${{ github.event.repository.name }}
-    # - name: Run tests
-    #   run: cargo test --verbose
-    build:
-    runs-on: windows-latest
-    steps:
-    - uses: actions/checkout@v4
-    - name: Windows build
-      run: cargo build --release --verbose
-    - name: Upload Windows artifact
-      uses: actions/upload-artifact@v4.3.3
-      with:
-        name: ${{ github.event.repository.name }}-windows_x86_64-release.exe
-        path: target/release/${{ github.event.repository.name }}.exe
-    # - name: Run tests
-    #   run: cargo test --verbose
+        name: ${{ matrix.asset_name }}
+        path: target/release/${{ matrix.artifact_name}}
