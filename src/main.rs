@@ -455,6 +455,5 @@ fn main() {
         rom.read_exact(&mut check).unwrap();
 
         if check[2..4] == [0, 0] { parse_cia(rom, args[1].to_string()) }
-    
     }
 }
