@@ -109,6 +109,7 @@ fn dump_section(ncch: &mut File, cia: &mut CiaReader, offset: u64, size: u32, se
             if tmp > 0 {
                 let mut buf = vec![0u8; tmp as usize];
                 cia.read(&mut buf);
+                if ncch.stream_position().unwrap() == 512 { buf[1] = 0x00; }
                 ncch.write_all(&buf).unwrap();
             }
         }
@@ -132,7 +133,7 @@ fn dump_section(ncch: &mut File, cia: &mut CiaReader, offset: u64, size: u32, se
         }
         return;
     }
-    
+
     let key_0x2c = u128::to_be_bytes(scramblekey(KEYS_0[0], keyys[0]));
     let get_crypto_key = |extra_crypto: &u8| -> usize { match extra_crypto { 0 => 0, 1 => 1, 10 => 2, 11 => 3, _ => 0 }};
 
@@ -210,10 +211,11 @@ fn dump_section(ncch: &mut File, cia: &mut CiaReader, offset: u64, size: u32, se
             let mut sizeleft = size;
             let mut buf = vec![0u8; CHUNK as usize];
             let mut ctr_cipher = Aes128Ctr::new_from_slices(&key, &ctr).unwrap();
-            
+
             while sizeleft > CHUNK {
                 cia.read(&mut buf);
-                ctr_cipher.apply_keystream(&mut buf);  
+                if cia.cidx != 0 { buf[1] = buf[1] ^ cia.cidx as u8 }
+                ctr_cipher.apply_keystream(&mut buf);
                 ncch.write_all(&buf).unwrap();
                 sizeleft -= CHUNK;
             }
@@ -221,6 +223,7 @@ fn dump_section(ncch: &mut File, cia: &mut CiaReader, offset: u64, size: u32, se
             if sizeleft > 0 {
                 buf = vec![0u8; sizeleft as usize];
                 cia.read(&mut buf);
+                if cia.cidx != 0 { buf[1] = buf[1] ^ cia.cidx as u8 }
                 ctr_cipher.apply_keystream(&mut buf);
                 ncch.write_all(&buf).unwrap();
             }
@@ -264,6 +267,7 @@ fn get_new_key(key_y: u128, header: &NcchHdr, titleid: String) -> u128 {
         println!("\t********************************");
         for country in ["JP", "US", "GB", "KR", "TW", "AU", "NZ"] {
             let req = attohttpc::get(format!("https://kagiya-ctr.cdn.nintendo.net/title/0x{}/ext_key?country={}", titleid, country))
+                .danger_accept_invalid_certs(true)
                 .send()
                 .unwrap();
             if req.is_success() {
@@ -344,8 +348,8 @@ fn parse_ncch(mut cia: CiaReader, mut titleid: [u8; 8], from_ncsd: bool) {
     
     let mut ncch: File = File::create(base).unwrap();
     tmp[399] = tmp[399] & 2 | 4;
-    ncch.write_all(&tmp).unwrap();
 
+    ncch.write_all(&tmp).unwrap();
     let mut counter: [u8; 16];
     if header.exhdrsize != 0 {
         counter = get_ncch_aes_counter(&header, NcchSection::ExHeader);
