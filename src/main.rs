@@ -271,9 +271,12 @@ fn get_new_key(key_y: u128, header: &NcchHdr, titleid: String) -> u128 {
                 .send()
                 .unwrap();
             if req.is_success() {
-                let bytes = req.text().unwrap();
-                seeds.insert(titleid.clone(), hex::decode(bytes).unwrap().try_into().unwrap());
-                break;
+                let bytes = req.bytes().unwrap();
+
+                if bytes.len() == 16 {
+                    seeds.insert(titleid.clone(), bytes.try_into().unwrap());
+                    break;
+                }
             }
         }
     }
