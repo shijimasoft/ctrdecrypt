@@ -1,10 +1,10 @@
 mod ctrutils;
-use ctrutils::{cbc_decrypt, gen_iv, CiaContent, CiaFile, CiaReader, NcchHdr};
+use ctrutils::{cbc_decrypt, gen_iv, CiaContent, CiaFile, CiaReader, NcchHdr, NcsdHdr};
 
 use byteorder::{ByteOrder, BigEndian, LittleEndian, ReadBytesExt};
 use aes::{cipher::{KeyIvInit, StreamCipher}, Aes128};
 
-use std::{collections::HashMap, env, fs::File, io::{Read, Seek, SeekFrom, Write, Cursor}, path::Path, usize, vec};
+use std::{collections::HashMap, env, fs::File, io::{Cursor, Read, Seek, SeekFrom, Write}, path::Path, usize, vec};
 
 use hex_literal::hex;
 
@@ -211,10 +211,9 @@ fn dump_section(ncch: &mut File, cia: &mut CiaReader, offset: u64, size: u32, se
             let mut sizeleft = size;
             let mut buf = vec![0u8; CHUNK as usize];
             let mut ctr_cipher = Aes128Ctr::new_from_slices(&key, &ctr).unwrap();
-
             while sizeleft > CHUNK {
                 cia.read(&mut buf);
-                if cia.cidx != 0 { buf[1] = buf[1] ^ cia.cidx as u8 }
+                if cia.cidx > 0 && !(cia.single_ncch || cia.from_ncsd) { buf[1] = buf[1] ^ cia.cidx as u8 }
                 ctr_cipher.apply_keystream(&mut buf);
                 ncch.write_all(&buf).unwrap();
                 sizeleft -= CHUNK;
@@ -223,7 +222,7 @@ fn dump_section(ncch: &mut File, cia: &mut CiaReader, offset: u64, size: u32, se
             if sizeleft > 0 {
                 buf = vec![0u8; sizeleft as usize];
                 cia.read(&mut buf);
-                if cia.cidx != 0 { buf[1] = buf[1] ^ cia.cidx as u8 }
+                if cia.cidx > 0 && !(cia.single_ncch || cia.from_ncsd) { buf[1] = buf[1] ^ cia.cidx as u8 }
                 ctr_cipher.apply_keystream(&mut buf);
                 ncch.write_all(&buf).unwrap();
             }
@@ -262,9 +261,6 @@ fn get_new_key(key_y: u128, header: &NcchHdr, titleid: String) -> u128 {
 
     // Check into Nintendo's servers
     if !seeds.contains_key(&titleid) {
-        println!("\t********************************");
-        println!("\tCouldn't find seed in seeddb, checking online...");
-        println!("\t********************************");
         for country in ["JP", "US", "GB", "KR", "TW", "AU", "NZ"] {
             let req = attohttpc::get(format!("https://kagiya-ctr.cdn.nintendo.net/title/0x{}/ext_key?country={}", titleid, country))
                 .danger_accept_invalid_certs(true)
@@ -273,9 +269,13 @@ fn get_new_key(key_y: u128, header: &NcchHdr, titleid: String) -> u128 {
             if req.is_success() {
                 let bytes = req.bytes().unwrap();
 
-                if bytes.len() == 16 {
-                    seeds.insert(titleid.clone(), bytes.try_into().unwrap());
-                    break;
+                match bytes.try_into() {
+                    Ok(bytes) => { 
+                        seeds.insert(titleid.clone(), bytes);
+                        println!("A seed has been found online in the region {}", country);
+                        break;
+                    }
+                    Err(_) => ()
                 }
             }
         }
@@ -296,9 +296,31 @@ fn get_new_key(key_y: u128, header: &NcchHdr, titleid: String) -> u128 {
     new_key
 }
 
-fn parse_ncch(mut cia: CiaReader, mut titleid: [u8; 8], from_ncsd: bool) {
-    println!("Parsing NCCH: {}", cia.cidx);
+fn parse_ncsd(cia: &mut CiaReader) {
+    println!("Parsing NCSD in file: {}", cia.name);
     cia.seek(0);
+    let mut tmp: [u8; 512] = [0u8; 512];
+    cia.read(&mut tmp);
+    let mut header: NcsdHdr = unsafe { std::mem::transmute(tmp) };
+    for idx in 0..header.offset_sizetable.len() {
+        if header.offset_sizetable[idx].offset != 0 {
+            cia.cidx = idx as u16;
+            header.titleid.reverse();
+            parse_ncch(cia, (header.offset_sizetable[idx].offset * MEDIA_UNIT_SIZE).clone().into(), header.titleid);
+        }
+    }
+}
+
+fn parse_ncch(cia: &mut CiaReader, offs: u64, mut titleid: [u8; 8]) {
+    if cia.from_ncsd {
+        println!("  Parsing {} NCCH", NCSD_PARTITIONS[cia.cidx as usize]);
+    } else if cia.single_ncch {
+        println!("  Parsing NCCH in file: {}", cia.name);
+    } else {
+        println!("Parsing NCCH: {}", cia.cidx)
+    }
+
+    cia.seek(offs);
     let mut tmp = [0u8; 512];
     cia.read(&mut tmp);
     let mut header: NcchHdr = unsafe { std::mem::transmute(tmp) };
@@ -342,11 +364,18 @@ fn parse_ncch(mut cia: CiaReader, mut titleid: [u8; 8], from_ncsd: bool) {
         key_y = get_new_key(ncch_key_y, &header, hex::encode(titleid));
         println!("Uses 9.6 NCCH Seed crypto with KeyY: {:032X}", key_y);
     }
-    let mut base: String = cia.name.strip_suffix(".cia").unwrap().to_string();
+
+    let mut base: String;
+    if cia.single_ncch || cia.from_ncsd {
+        base = cia.name.strip_suffix(".3ds").unwrap().to_string();
+    } else {
+        base = cia.name.strip_suffix(".cia").unwrap().to_string();
+    }
+
     base = format!("{}/{}.{}.ncch",
             env::current_dir().unwrap().to_str().unwrap(),
             base, 
-            if from_ncsd { NCSD_PARTITIONS[cia.cidx as usize].to_string() } else { cia.cidx.to_string() }
+            if cia.from_ncsd { NCSD_PARTITIONS[cia.cidx as usize].to_string() } else { cia.cidx.to_string() }
         );
     
     let mut ncch: File = File::create(base).unwrap();
@@ -356,17 +385,17 @@ fn parse_ncch(mut cia: CiaReader, mut titleid: [u8; 8], from_ncsd: bool) {
     let mut counter: [u8; 16];
     if header.exhdrsize != 0 {
         counter = get_ncch_aes_counter(&header, NcchSection::ExHeader);
-        dump_section(&mut ncch, &mut cia, 512, header.exhdrsize * 2, NcchSection::ExHeader, 0, counter, uses_extra_crypto, fixed_crypto, encrypted, [ncch_key_y, key_y]);
+        dump_section(&mut ncch, cia, 512, header.exhdrsize * 2, NcchSection::ExHeader, 0, counter, uses_extra_crypto, fixed_crypto, encrypted, [ncch_key_y, key_y]);
     }
 
     if header.exefssize != 0 {
         counter = get_ncch_aes_counter(&header, NcchSection::ExeFS);
-        dump_section(&mut ncch, &mut cia, (header.exefsoffset * MEDIA_UNIT_SIZE) as u64, header.exefssize * MEDIA_UNIT_SIZE, NcchSection::ExeFS, 1, counter, uses_extra_crypto, fixed_crypto, encrypted, [ncch_key_y, key_y]);
+        dump_section(&mut ncch, cia, (header.exefsoffset * MEDIA_UNIT_SIZE) as u64, header.exefssize * MEDIA_UNIT_SIZE, NcchSection::ExeFS, 1, counter, uses_extra_crypto, fixed_crypto, encrypted, [ncch_key_y, key_y]);
     }
 
     if header.romfssize != 0 {
         counter = get_ncch_aes_counter(&header, NcchSection::RomFS);
-        dump_section(&mut ncch, &mut cia, (header.romfsoffset * MEDIA_UNIT_SIZE) as u64, header.romfssize * MEDIA_UNIT_SIZE, NcchSection::RomFS, 2, counter, uses_extra_crypto, fixed_crypto, encrypted, [ncch_key_y, key_y]);
+        dump_section(&mut ncch, cia, (header.romfsoffset * MEDIA_UNIT_SIZE) as u64, header.romfssize * MEDIA_UNIT_SIZE, NcchSection::RomFS, 2, counter, uses_extra_crypto, fixed_crypto, encrypted, [ncch_key_y, key_y]);
     }
 }
 
@@ -436,9 +465,9 @@ fn parse_cia(mut romfile: File, filename: String) {
             Ok(utf8) => if utf8 == "NCCH"
             {
                 romfile.seek(SeekFrom::Start(contentoffs + next_content_offs)).unwrap();
-                let cia_handle = CiaReader::new(romfile.try_clone().unwrap(), cenc, filename.clone(), titkey, content.cidx, contentoffs + next_content_offs);
+                let mut cia_handle = CiaReader::new(romfile.try_clone().unwrap(), cenc, filename.clone(), titkey, content.cidx, contentoffs + next_content_offs, false, false);
                 next_content_offs += align(content.csize, 64);
-                parse_ncch(cia_handle, tid[0..8].try_into().unwrap(), false);
+                parse_ncch(&mut cia_handle, 0, tid[0..8].try_into().unwrap());
             } else { println!("CIA content can't be parsed, skipping partition") }
             Err(_) => println!("CIA content can't be parsed, skipping partition")
         }
@@ -456,7 +485,25 @@ fn main() {
     }
     
     let mut rom = File::open(&args[1]).unwrap();
-    
+    rom.seek(SeekFrom::Start(256)).unwrap();
+    let mut magic: [u8; 4] = [0u8; 4];
+    rom.read_exact(&mut magic).unwrap();
+
+    match std::str::from_utf8(&magic) {
+        Ok(ptype) => {
+            if ptype == "NCSD" {
+                let mut reader = CiaReader::new(rom.try_clone().unwrap(), false, args[1].to_string(), [0u8; 16], 0, 0, false, true);
+                parse_ncsd(&mut reader);
+                return;
+            } else if ptype == "NCCH" {
+                let mut reader = CiaReader::new(rom.try_clone().unwrap(), false, args[1].to_string(), [0u8; 16], 0, 0, true, false);
+                parse_ncch(&mut reader, 0, [0u8; 8]);
+                return;
+            }
+        }
+        Err(_) => ()
+    }
+
     if args[1].ends_with(".cia") {
         let mut check: [u8; 4] = [0; 4];
         rom.read_exact(&mut check).unwrap();

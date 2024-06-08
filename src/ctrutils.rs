@@ -55,6 +55,26 @@ pub struct NcchHdr {
 }
 
 #[repr(C)]
+pub struct NcchOffsetSize {
+    pub offset: u32,
+    size: u32,
+}
+
+#[repr(C)]
+pub struct NcsdHdr {
+    signature: [u8; 256],
+    magic: [u8; 4],
+    mediasize: u32,
+    pub titleid: [u8; 8],
+    padding0: [u8; 16],
+    pub offset_sizetable: [NcchOffsetSize; 8],
+    padding1: [u8; 40],
+    flags: [u8; 8],
+    ncchidtable: [u8; 64],
+    padding2: [u8; 48]
+}
+
+#[repr(C)]
 pub struct CiaFile {
     pub headersize: u32,
     pub type_: u16,
@@ -82,11 +102,13 @@ pub struct CiaReader {
     pub cidx: u16,
     iv: [u8; 16],
     contentoff: u64,
+    pub single_ncch: bool,
+    pub from_ncsd: bool,
     last_enc_block: u128,
 }
 
 impl CiaReader {
-    pub fn new(fhandle: File, encrypted: bool, name: String, key: [u8; 16], cidx: u16, contentoff: u64) -> CiaReader {
+    pub fn new(fhandle: File, encrypted: bool, name: String, key: [u8; 16], cidx: u16, contentoff: u64, single_ncch: bool, from_ncsd: bool) -> CiaReader {
         CiaReader {
             fhandle,
             encrypted,
@@ -95,12 +117,16 @@ impl CiaReader {
             cidx,
             iv: gen_iv(cidx),
             contentoff,
+            single_ncch,
+            from_ncsd,
             last_enc_block: 0
         }
     }
 
     pub fn seek(&mut self, offs: u64) {
-        if offs == 0 {
+        if self.single_ncch || self.from_ncsd {
+            self.fhandle.seek(SeekFrom::Start(offs)).unwrap();
+        } else if offs == 0 {
             self.fhandle.seek(SeekFrom::Start(self.contentoff)).unwrap();
             self.iv = gen_iv(self.cidx);
         } else {
@@ -111,8 +137,8 @@ impl CiaReader {
 
     pub fn read(&mut self, data: &mut [u8]) {
         self.fhandle.read_exact(data).unwrap();
+
         if self.encrypted {
-            
             let last_enc_block = BigEndian::read_u128(&data[(data.len() - 16)..]);
             cbc_decrypt(&self.key, &self.iv, data);
             let first_dec_block = BigEndian::read_u128(&data[0..16]);
