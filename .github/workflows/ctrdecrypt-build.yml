@@ -23,14 +23,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v4
-    - name: Build release
-      if: ${{ matrix.os }} != 'macos-latest'
-      run:
-        cargo build --release
-    - if: ${{ matrix.os }} == 'ubuntu-latest'
-      run:
-        strip target/release/${{ matrix.artifact_name }}
-    - if: ${{ matrix.os }} == 'macos-latest'
+
+    - name: Build release on Linux and Windows
+      if: ${{ matrix.os != 'macos-latest' }}
+      run: cargo build --release
+
+    - name: Build release on macOS
+      if: ${{ matrix.os == 'macos-latest' }}
       run: |
         rustup target add x86_64-apple-darwin
         cargo install cargo-lipo
@@ -38,8 +37,13 @@ jobs:
         cargo build --release --target x86_64-apple-darwin
         lipo -create -output target/release/${{ matrix.artifact_name }} target/aarch64-apple-darwin/release/${{ matrix.artifact_name }} target/x86_64-apple-darwin/release/${{ matrix.artifact_name }}
         strip target/release/${{ matrix.artifact_name }}
+
+    - name: Remove symbols from Linux binary
+      if: ${{ matrix.os == 'ubuntu-latest' }}
+      run: strip target/release/${{ matrix.artifact_name }}
+
     - name: Upload artifacts
       uses: actions/upload-artifact@v4.3.3
       with:
         name: ${{ matrix.asset_name }}
-        path: target/release/${{ matrix.artifact_name}}
+        path: target/release/${{ matrix.artifact_name }}
