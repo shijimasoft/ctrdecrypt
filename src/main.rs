@@ -305,6 +305,7 @@ fn parse_ncsd(cia: &mut CiaReader) {
     for idx in 0..header.offset_sizetable.len() {
         if header.offset_sizetable[idx].offset != 0 {
             cia.cidx = idx as u16;
+            cia.content_id = idx as u32;
             header.titleid.reverse();
             parse_ncch(cia, (header.offset_sizetable[idx].offset * MEDIA_UNIT_SIZE).clone().into(), header.titleid);
         }
