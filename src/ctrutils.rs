@@ -99,6 +99,7 @@ pub struct CiaReader {
     encrypted: bool,
     pub name: String,
     pub key: [u8; 16],
+    pub content_id: u32,
     pub cidx: u16,
     iv: [u8; 16],
     contentoff: u64,
@@ -108,12 +109,13 @@ pub struct CiaReader {
 }
 
 impl CiaReader {
-    pub fn new(fhandle: File, encrypted: bool, name: String, key: [u8; 16], cidx: u16, contentoff: u64, single_ncch: bool, from_ncsd: bool) -> CiaReader {
+    pub fn new(fhandle: File, encrypted: bool, name: String, key: [u8; 16], content_id: u32, cidx: u16, contentoff: u64, single_ncch: bool, from_ncsd: bool) -> CiaReader {
         CiaReader {
             fhandle,
             encrypted,
             name,
             key,
+            content_id,
             cidx,
             iv: gen_iv(cidx),
             contentoff,
