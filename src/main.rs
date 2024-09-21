@@ -330,12 +330,13 @@ fn parse_ncch(cia: &mut CiaReader, offs: u64, mut titleid: [u8; 8]) {
     }
 
     let ncch_key_y = BigEndian::read_u128(header.signature[0..16].try_into().unwrap());
-    
+
     println!("  Product code: {}", std::str::from_utf8(&header.productcode).unwrap());
     println!("  KeyY: {:032X}", ncch_key_y);
     header.titleid.reverse();
     println!("  Title ID: {}", hex::encode(header.titleid).to_uppercase());
     header.titleid.reverse();
+    println!("  Content ID: {:08X}\n", cia.content_id);
     println!("  Format version: {}\n", header.formatversion);
 
     let uses_extra_crypto: u8 = header.flags[3];
@@ -343,7 +344,7 @@ fn parse_ncch(cia: &mut CiaReader, offs: u64, mut titleid: [u8; 8]) {
     if flag_to_bool(uses_extra_crypto) {
         println!("  Uses extra NCCH crypto, keyslot 0x25");
     }
-    
+
     let mut fixed_crypto: u8 = 0;
     let mut encrypted: bool = true;
 
@@ -366,18 +367,21 @@ fn parse_ncch(cia: &mut CiaReader, offs: u64, mut titleid: [u8; 8]) {
     }
 
     let mut base: String;
+    let path = Path::new(&cia.name);
+    let file_name = path.file_name().unwrap().to_string_lossy();
     if cia.single_ncch || cia.from_ncsd {
-        base = cia.name.strip_suffix(".3ds").unwrap().to_string();
+        base = file_name.strip_suffix(".3ds").unwrap().to_string();
     } else {
-        base = cia.name.strip_suffix(".cia").unwrap().to_string();
+        base = file_name.strip_suffix(".cia").unwrap().to_string();
     }
 
-    base = format!("{}/{}.{}.ncch",
+    base = format!("{}/{}.{}.{:08X}.ncch",
             env::current_dir().unwrap().to_str().unwrap(),
-            base, 
-            if cia.from_ncsd { NCSD_PARTITIONS[cia.cidx as usize].to_string() } else { cia.cidx.to_string() }
+            base,
+            if cia.from_ncsd { NCSD_PARTITIONS[cia.cidx as usize].to_string() } else { cia.cidx.to_string() },
+            cia.content_id
         );
-    
+
     let mut ncch: File = File::create(base).unwrap();
     tmp[399] = tmp[399] & 2 | 4;
 
@@ -404,7 +408,7 @@ fn parse_cia(mut romfile: File, filename: String) {
     let mut tmp: [u8; 32] = [0; 32];
     romfile.read_exact(&mut tmp).unwrap();
     let cia: CiaFile = unsafe { std::mem::transmute(tmp) };
-    
+
     let cachainoff = align(cia.headersize as u64, 64);
     let tikoff = align(cachainoff + cia.cachainsize as u64, 64);
     let tmdoff = align(tikoff + cia.tiksize as u64, 64);
@@ -426,7 +430,7 @@ fn parse_cia(mut romfile: File, filename: String) {
     let mut cmnkeyidx: u8 = 0;
     romfile.read_exact(std::slice::from_mut(&mut cmnkeyidx)).unwrap();
 
-    cbc_decrypt(&CMNKEYS[cmnkeyidx as usize], &tid,&mut enckey);
+    cbc_decrypt(&CMNKEYS[cmnkeyidx as usize], &tid, &mut enckey);
     let titkey = enckey;
 
     romfile.seek(SeekFrom::Start((tmdoff + 518) as u64)).unwrap();
@@ -465,7 +469,7 @@ fn parse_cia(mut romfile: File, filename: String) {
             Ok(utf8) => if utf8 == "NCCH"
             {
                 romfile.seek(SeekFrom::Start(contentoffs + next_content_offs)).unwrap();
-                let mut cia_handle = CiaReader::new(romfile.try_clone().unwrap(), cenc, filename.clone(), titkey, content.cidx, contentoffs + next_content_offs, false, false);
+                let mut cia_handle = CiaReader::new(romfile.try_clone().unwrap(), cenc, filename.clone(), titkey, content.cid, content.cidx, contentoffs + next_content_offs, false, false);
                 next_content_offs += align(content.csize, 64);
                 parse_ncch(&mut cia_handle, 0, tid[0..8].try_into().unwrap());
             } else { println!("CIA content can't be parsed, skipping partition") }
@@ -483,7 +487,7 @@ fn main() {
         println!("ROM does not exist");
         return;
     }
-    
+
     let mut rom = File::open(&args[1]).unwrap();
     rom.seek(SeekFrom::Start(256)).unwrap();
     let mut magic: [u8; 4] = [0u8; 4];
@@ -492,11 +496,11 @@ fn main() {
     match std::str::from_utf8(&magic) {
         Ok(ptype) => {
             if ptype == "NCSD" {
-                let mut reader = CiaReader::new(rom.try_clone().unwrap(), false, args[1].to_string(), [0u8; 16], 0, 0, false, true);
+                let mut reader = CiaReader::new(rom.try_clone().unwrap(), false, args[1].to_string(), [0u8; 16], 0, 0, 0, false, true);
                 parse_ncsd(&mut reader);
                 return;
             } else if ptype == "NCCH" {
-                let mut reader = CiaReader::new(rom.try_clone().unwrap(), false, args[1].to_string(), [0u8; 16], 0, 0, true, false);
+                let mut reader = CiaReader::new(rom.try_clone().unwrap(), false, args[1].to_string(), [0u8; 16], 0, 0, 0, true, false);
                 parse_ncch(&mut reader, 0, [0u8; 8]);
                 return;
             }
