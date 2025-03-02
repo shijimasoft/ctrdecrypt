@@ -404,7 +404,7 @@ fn parse_ncch(cia: &mut CiaReader, offs: u64, mut titleid: [u8; 8]) {
     }
 }
 
-fn parse_cia(mut romfile: File, filename: String) {
+fn parse_cia(mut romfile: File, filename: String, partition: Option<u8>) {
     romfile.seek(SeekFrom::Start(0)).unwrap();
     let mut tmp: [u8; 32] = [0; 32];
     romfile.read_exact(&mut tmp).unwrap();
@@ -472,7 +472,13 @@ fn parse_cia(mut romfile: File, filename: String) {
                 romfile.seek(SeekFrom::Start(contentoffs + next_content_offs)).unwrap();
                 let mut cia_handle = CiaReader::new(romfile.try_clone().unwrap(), cenc, filename.clone(), titkey, content.cid, content.cidx, contentoffs + next_content_offs, false, false);
                 next_content_offs += align(content.csize, 64);
+
+                match partition {
+                    Some(number) => if (i as u8) != number { continue; },
+                    None => (),
+                }
                 parse_ncch(&mut cia_handle, 0, tid[0..8].try_into().unwrap());
+
             } else { println!("CIA content can't be parsed, skipping partition") }
             Err(_) => println!("CIA content can't be parsed, skipping partition")
         }
@@ -481,12 +487,25 @@ fn parse_cia(mut romfile: File, filename: String) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        println!("Usage: ctrdecrypt <ROMFILE>");
+    let mut partition: Option<u8> = None;
+    if args.len() < 2 || args.len() == 3 {
+        // Decrypting a specific NCCH container is supported only for .cia backups
+        println!("Usage: ctrdecrypt <ROMFILE> [--ncch <partion-number>]");
         return;
     } else if !Path::exists(Path::new(&args[1])) {
         println!("ROM does not exist");
         return;
+    } else if args.len() == 4 {
+        if args[2] != "--ncch" {
+            println!("Invalid argument: {}", args[2]);
+            return;
+        }
+        if args[3].parse::<u8>().is_err() {
+            println!("Invalid partition number: {}", args[3]);
+            return;
+        } else {
+            partition = Some(args[3].parse::<u8>().unwrap());
+        }
     }
 
     let mut rom = File::open(&args[1]).unwrap();
@@ -513,6 +532,6 @@ fn main() {
         let mut check: [u8; 4] = [0; 4];
         rom.read_exact(&mut check).unwrap();
 
-        if check[2..4] == [0, 0] { parse_cia(rom, args[1].to_string()) }
+        if check[2..4] == [0, 0] { parse_cia(rom, args[1].to_string(), partition) }
     }
 }
