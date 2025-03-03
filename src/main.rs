@@ -7,6 +7,7 @@ use aes::{cipher::{KeyIvInit, StreamCipher}, Aes128};
 use std::{collections::HashMap, env, fs::File, io::{Cursor, Read, Seek, SeekFrom, Write}, path::Path, usize, vec};
 
 use hex_literal::hex;
+use log::{debug, info, LevelFilter};
 
 const CMNKEYS: [[u8; 16]; 6] = [
     hex!("64c5fd55dd3ad988325baaec5243db98"),
@@ -99,9 +100,9 @@ fn scramblekey(key_x: u128, key_y: u128) -> u128 {
 fn dump_section(ncch: &mut File, cia: &mut CiaReader, offset: u64, size: u32, sec_type: NcchSection, sec_idx: usize, ctr: [u8; 16], uses_extra_crypto: u8, fixed_crypto: u8, encrypted: bool, keyys: [u128; 2]) {
     let sections = ["ExHeader", "ExeFS", "RomFS"];
     const CHUNK: u32 = 4194304; // 4 MiB
-    println!("  {} offset: {:08X}", sections[sec_idx], offset);
-    println!("  {} counter: {}", sections[sec_idx], hex::encode(&ctr));
-    println!("  {} size: {} bytes", sections[sec_idx], size);
+    debug!("  {} offset: {:08X}", sections[sec_idx], offset);
+    debug!("  {} counter: {}", sections[sec_idx], hex::encode(&ctr));
+    debug!("  {} size: {} bytes", sections[sec_idx], size);
 
     // Prevent integer overflow
     match offset.checked_sub(ncch.stream_position().unwrap()) {
@@ -256,7 +257,7 @@ fn get_new_key(key_y: u128, header: &NcchHdr, titleid: String) -> u128 {
                 seeddb.seek(SeekFrom::Current(8)).unwrap();
             }
         }
-        Err(_) => println!("seeddb.bin not found, trying to connect to Nintendo servers...")
+        Err(_) => debug!("seeddb.bin not found, trying to connect to Nintendo servers...")
     }
 
     // Check into Nintendo's servers
@@ -272,7 +273,7 @@ fn get_new_key(key_y: u128, header: &NcchHdr, titleid: String) -> u128 {
                 match bytes.try_into() {
                     Ok(bytes) => { 
                         seeds.insert(titleid.clone(), bytes);
-                        println!("A seed has been found online in the region {}", country);
+                        debug!("A seed has been found online in the region {}", country);
                         break;
                     }
                     Err(_) => ()
@@ -297,7 +298,7 @@ fn get_new_key(key_y: u128, header: &NcchHdr, titleid: String) -> u128 {
 }
 
 fn parse_ncsd(cia: &mut CiaReader) {
-    println!("Parsing NCSD in file: {}", cia.name);
+    debug!("Parsing NCSD in file: {}", cia.name);
     cia.seek(0);
     let mut tmp: [u8; 512] = [0u8; 512];
     cia.read(&mut tmp);
@@ -314,11 +315,11 @@ fn parse_ncsd(cia: &mut CiaReader) {
 
 fn parse_ncch(cia: &mut CiaReader, offs: u64, mut titleid: [u8; 8]) {
     if cia.from_ncsd {
-        println!("  Parsing {} NCCH", NCSD_PARTITIONS[cia.cidx as usize]);
+        debug!("  Parsing {} NCCH", NCSD_PARTITIONS[cia.cidx as usize]);
     } else if cia.single_ncch {
-        println!("  Parsing NCCH in file: {}", cia.name);
+        debug!("  Parsing NCCH in file: {}", cia.name);
     } else {
-        println!("Parsing NCCH: {}", cia.cidx)
+        debug!("Parsing NCCH: {}", cia.cidx)
     }
 
     cia.seek(offs);
@@ -332,18 +333,18 @@ fn parse_ncch(cia: &mut CiaReader, offs: u64, mut titleid: [u8; 8]) {
 
     let ncch_key_y = BigEndian::read_u128(header.signature[0..16].try_into().unwrap());
 
-    println!("  Product code: {}", std::str::from_utf8(&header.productcode).unwrap());
-    println!("  KeyY: {:032X}", ncch_key_y);
+    debug!("  Product code: {}", std::str::from_utf8(&header.productcode).unwrap());
+    debug!("  KeyY: {:032X}", ncch_key_y);
     header.titleid.reverse();
-    println!("  Title ID: {}", hex::encode(header.titleid).to_uppercase());
+    debug!("  Title ID: {}", hex::encode(header.titleid).to_uppercase());
     header.titleid.reverse();
-    println!("  Content ID: {:08X}\n", cia.content_id);
-    println!("  Format version: {}\n", header.formatversion);
+    debug!("  Content ID: {:08X}\n", cia.content_id);
+    debug!("  Format version: {}\n", header.formatversion);
 
     let uses_extra_crypto: u8 = header.flags[3];
 
     if flag_to_bool(uses_extra_crypto) {
-        println!("  Uses extra NCCH crypto, keyslot 0x25");
+        debug!("  Uses extra NCCH crypto, keyslot 0x25");
     }
 
     let mut fixed_crypto: u8 = 0;
@@ -351,12 +352,12 @@ fn parse_ncch(cia: &mut CiaReader, offs: u64, mut titleid: [u8; 8]) {
 
     if flag_to_bool(header.flags[7] & 1) {
         if flag_to_bool(header.titleid[3] & 16) { fixed_crypto = 2 } else { fixed_crypto = 1 }
-        println!("  Uses fixed-key crypto")
+        debug!("  Uses fixed-key crypto")
     }
 
     if flag_to_bool(header.flags[7] & 4) {
         encrypted = false;
-        println!("  Not encrypted")
+        debug!("  Not encrypted")
     }
 
     let use_seed_crypto: bool = (header.flags[7] & 32) != 0;
@@ -364,7 +365,7 @@ fn parse_ncch(cia: &mut CiaReader, offs: u64, mut titleid: [u8; 8]) {
 
     if use_seed_crypto {
         key_y = get_new_key(ncch_key_y, &header, hex::encode(titleid));
-        println!("Uses 9.6 NCCH Seed crypto with KeyY: {:032X}", key_y);
+        debug!("Uses 9.6 NCCH Seed crypto with KeyY: {:032X}", key_y);
     }
 
     let mut base: String;
@@ -383,7 +384,7 @@ fn parse_ncch(cia: &mut CiaReader, offs: u64, mut titleid: [u8; 8]) {
             cia.content_id
         );
 
-    let mut ncch: File = File::create(base).unwrap();
+    let mut ncch: File = File::create(base.clone()).unwrap();
     tmp[399] = tmp[399] & 2 | 4;
 
     ncch.write_all(&tmp).unwrap();
@@ -402,6 +403,8 @@ fn parse_ncch(cia: &mut CiaReader, offs: u64, mut titleid: [u8; 8]) {
         counter = get_ncch_aes_counter(&header, NcchSection::RomFS);
         dump_section(&mut ncch, cia, (header.romfsoffset * MEDIA_UNIT_SIZE) as u64, header.romfssize * MEDIA_UNIT_SIZE, NcchSection::RomFS, 2, counter, uses_extra_crypto, fixed_crypto, encrypted, [ncch_key_y, key_y]);
     }
+    
+    info!("{}", base);
 }
 
 fn parse_cia(mut romfile: File, filename: String, partition: Option<u8>) {
@@ -423,7 +426,7 @@ fn parse_cia(mut romfile: File, filename: String, partition: Option<u8>) {
     romfile.read_exact(&mut tid[0..8]).unwrap();
 
     if hex::encode(tid).starts_with("00048") {
-        println!("Unsupported CIA file");
+        debug!("Unsupported CIA file");
         return
     }
 
@@ -479,34 +482,57 @@ fn parse_cia(mut romfile: File, filename: String, partition: Option<u8>) {
                 }
                 parse_ncch(&mut cia_handle, 0, tid[0..8].try_into().unwrap());
 
-            } else { println!("CIA content can't be parsed, skipping partition") }
-            Err(_) => println!("CIA content can't be parsed, skipping partition")
+            } else { debug!("CIA content can't be parsed, skipping partition") }
+            Err(_) => debug!("CIA content can't be parsed, skipping partition")
         }
     }
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+
     let mut partition: Option<u8> = None;
-    if args.len() < 2 || args.len() == 3 {
-        // Decrypting a specific NCCH container is supported only for .cia backups
-        println!("Usage: ctrdecrypt <ROMFILE> [--ncch <partion-number>]");
+    let mut verbose = true;
+
+    if args.len() < 2 {
+        println!("Usage: ctrdecrypt <ROMFILE> [OPTIONS]\nOptions:\n\t--ncch <partition-number>\n\t--no-verbose");
         return;
-    } else if !Path::exists(Path::new(&args[1])) {
+    }
+
+    if !Path::exists(Path::new(&args[1])) {
         println!("ROM does not exist");
         return;
-    } else if args.len() == 4 {
-        if args[2] != "--ncch" {
-            println!("Invalid argument: {}", args[2]);
-            return;
-        }
-        if args[3].parse::<u8>().is_err() {
-            println!("Invalid partition number: {}", args[3]);
-            return;
-        } else {
-            partition = Some(args[3].parse::<u8>().unwrap());
-        }
     }
+
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--ncch" => {
+                if i + 1 >= args.len() {
+                    println!("Missing partition number");
+                    return;
+                }
+                match args[i + 1].parse::<u8>() {
+                    Ok(num) => partition = Some(num),
+                    Err(_) => {
+                        println!("Invalid partition number: {}", args[i + 1]);
+                    }
+                }
+                i += 1; // Partition number already checked
+            }
+            "--no-verbose" => verbose = false,
+            _ => {
+                println!("Invalid argument: {}", args[i]);
+                return;
+            }
+        }
+        i += 1;
+    }
+
+    env_logger::Builder::new()
+        .format(|buf, record| writeln!(buf, "{}", record.args()))
+        .filter(None, if verbose { LevelFilter::Debug } else { LevelFilter::Info })
+        .init();
 
     let mut rom = File::open(&args[1]).unwrap();
     rom.seek(SeekFrom::Start(256)).unwrap();
