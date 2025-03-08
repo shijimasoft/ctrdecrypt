@@ -371,6 +371,7 @@ fn parse_ncch(cia: &mut CiaReader, offs: u64, mut titleid: [u8; 8]) {
     let mut base: String;
     let path = Path::new(&cia.name);
     let file_name = path.file_name().unwrap().to_string_lossy();
+
     if cia.single_ncch || cia.from_ncsd {
         base = file_name.strip_suffix(".3ds").unwrap().to_string();
     } else {
@@ -378,7 +379,7 @@ fn parse_ncch(cia: &mut CiaReader, offs: u64, mut titleid: [u8; 8]) {
     }
 
     base = format!("{}/{}.{}.{:08X}.ncch",
-            env::current_dir().unwrap().to_str().unwrap(),
+            path.parent().unwrap().display(),
             base,
             if cia.from_ncsd { NCSD_PARTITIONS[cia.cidx as usize].to_string() } else { cia.cidx.to_string() },
             cia.content_id
