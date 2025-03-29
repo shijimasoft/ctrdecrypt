@@ -97,7 +97,7 @@ fn scramblekey(key_x: u128, key_y: u128) -> u128 {
     rol(value, 87)
 }
 
-fn dump_section(ncch: &mut File, cia: &mut CiaReader, offset: u64, size: u32, sec_type: NcchSection, sec_idx: usize, ctr: [u8; 16], uses_extra_crypto: u8, fixed_crypto: u8, encrypted: bool, keyys: [u128; 2]) {
+fn dump_section(ncch: &mut File, cia: &mut CiaReader, offset: u64, size: u32, sec_type: NcchSection, sec_idx: usize, ctr: [u8; 16], uses_extra_crypto: u8, fixed_crypto: u8, use_seed_crypto: bool, encrypted: bool, keyys: [u128; 2]) {
     let sections = ["ExHeader", "ExeFS", "RomFS"];
     const CHUNK: u32 = 4194304; // 4 MiB
     debug!("  {} offset: {:08X}", sections[sec_idx], offset);
@@ -163,7 +163,7 @@ fn dump_section(ncch: &mut File, cia: &mut CiaReader, offset: u64, size: u32, se
                 .unwrap()
                 .apply_keystream(&mut exetmp);
 
-            if flag_to_bool(uses_extra_crypto) {
+            if flag_to_bool(uses_extra_crypto) || use_seed_crypto {
                 let mut exetmp2 = exedata;
                 key = u128::to_be_bytes(scramblekey(KEYS_0[get_crypto_key(&uses_extra_crypto)], keyys[1]));
                 
@@ -400,17 +400,17 @@ fn parse_ncch(cia: &mut CiaReader, offs: u64, mut titleid: [u8; 8]) {
     let mut counter: [u8; 16];
     if header.exhdrsize != 0 {
         counter = get_ncch_aes_counter(&header, NcchSection::ExHeader);
-        dump_section(&mut ncch, cia, 512, header.exhdrsize * 2, NcchSection::ExHeader, 0, counter, uses_extra_crypto, fixed_crypto, encrypted, [ncch_key_y, key_y]);
+        dump_section(&mut ncch, cia, 512, header.exhdrsize * 2, NcchSection::ExHeader, 0, counter, uses_extra_crypto, fixed_crypto, use_seed_crypto, encrypted, [ncch_key_y, key_y]);
     }
 
     if header.exefssize != 0 {
         counter = get_ncch_aes_counter(&header, NcchSection::ExeFS);
-        dump_section(&mut ncch, cia, (header.exefsoffset * MEDIA_UNIT_SIZE) as u64, header.exefssize * MEDIA_UNIT_SIZE, NcchSection::ExeFS, 1, counter, uses_extra_crypto, fixed_crypto, encrypted, [ncch_key_y, key_y]);
+        dump_section(&mut ncch, cia, (header.exefsoffset * MEDIA_UNIT_SIZE) as u64, header.exefssize * MEDIA_UNIT_SIZE, NcchSection::ExeFS, 1, counter, uses_extra_crypto, fixed_crypto, use_seed_crypto, encrypted, [ncch_key_y, key_y]);
     }
 
     if header.romfssize != 0 {
         counter = get_ncch_aes_counter(&header, NcchSection::RomFS);
-        dump_section(&mut ncch, cia, (header.romfsoffset * MEDIA_UNIT_SIZE) as u64, header.romfssize * MEDIA_UNIT_SIZE, NcchSection::RomFS, 2, counter, uses_extra_crypto, fixed_crypto, encrypted, [ncch_key_y, key_y]);
+        dump_section(&mut ncch, cia, (header.romfsoffset * MEDIA_UNIT_SIZE) as u64, header.romfssize * MEDIA_UNIT_SIZE, NcchSection::RomFS, 2, counter, uses_extra_crypto, fixed_crypto, use_seed_crypto, encrypted, [ncch_key_y, key_y]);
     }
     
     info!("{}", base);
