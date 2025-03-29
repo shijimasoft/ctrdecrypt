@@ -4,7 +4,7 @@ use ctrutils::{cbc_decrypt, gen_iv, CiaContent, CiaFile, CiaReader, NcchHdr, Ncs
 use byteorder::{ByteOrder, BigEndian, LittleEndian, ReadBytesExt};
 use aes::{cipher::{KeyIvInit, StreamCipher}, Aes128};
 
-use std::{collections::HashMap, env, fs::File, io::{Cursor, Read, Seek, SeekFrom, Write}, path::Path, usize, vec};
+use std::{collections::HashMap, fs::canonicalize, fs::File, io::{Cursor, Read, Seek, SeekFrom, Write}, path::Path, usize, vec};
 
 use hex_literal::hex;
 use log::{debug, info, LevelFilter};
@@ -378,8 +378,16 @@ fn parse_ncch(cia: &mut CiaReader, offs: u64, mut titleid: [u8; 8]) {
         base = file_name.strip_suffix(".cia").unwrap().to_string();
     }
 
+    let absolute_path = canonicalize(&path).unwrap();
+    let final_path = if cfg!(windows) && absolute_path.to_string_lossy().starts_with(r"\\?\") {
+        Path::new(&absolute_path.to_string_lossy()[4..].replace("\\", "/")).to_path_buf()
+    } else {
+        absolute_path
+    };
+    let parent_dir = final_path.parent().unwrap();
+
     base = format!("{}/{}.{}.{:08X}.ncch",
-            path.parent().unwrap().display(),
+            parent_dir.display(),
             base,
             if cia.from_ncsd { NCSD_PARTITIONS[cia.cidx as usize].to_string() } else { cia.cidx.to_string() },
             cia.content_id
