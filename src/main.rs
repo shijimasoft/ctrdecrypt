@@ -302,13 +302,14 @@ fn parse_ncsd(cia: &mut CiaReader) {
     cia.seek(0);
     let mut tmp: [u8; 512] = [0u8; 512];
     cia.read(&mut tmp);
-    let mut header: NcsdHdr = unsafe { std::mem::transmute(tmp) };
+    let header: NcsdHdr = unsafe { std::mem::transmute(tmp) };
     for idx in 0..header.offset_sizetable.len() {
         if header.offset_sizetable[idx].offset != 0 {
             cia.cidx = idx as u16;
             cia.content_id = idx as u32;
-            header.titleid.reverse();
-            parse_ncch(cia, (header.offset_sizetable[idx].offset * MEDIA_UNIT_SIZE).clone().into(), header.titleid);
+            let mut tid: [u8; 8] = header.titleid;
+            tid.reverse();
+            parse_ncch(cia, (header.offset_sizetable[idx].offset * MEDIA_UNIT_SIZE).clone().into(), tid);
         }
     }
 }
@@ -325,19 +326,19 @@ fn parse_ncch(cia: &mut CiaReader, offs: u64, mut titleid: [u8; 8]) {
     cia.seek(offs);
     let mut tmp = [0u8; 512];
     cia.read(&mut tmp);
-    let mut header: NcchHdr = unsafe { std::mem::transmute(tmp) };
+    let header: NcchHdr = unsafe { std::mem::transmute(tmp) };
     if titleid.iter().all(|&x| x == 0) {
         titleid = header.programid;
         titleid.reverse();
     }
 
     let ncch_key_y = BigEndian::read_u128(header.signature[0..16].try_into().unwrap());
+    let mut tid: [u8; 8] = header.titleid;
+    tid.reverse();
 
     debug!("  Product code: {}", std::str::from_utf8(&header.productcode).unwrap());
     debug!("  KeyY: {:032X}", ncch_key_y);
-    header.titleid.reverse();
-    debug!("  Title ID: {}", hex::encode(header.titleid).to_uppercase());
-    header.titleid.reverse();
+    debug!("  Title ID: {}", hex::encode(tid).to_uppercase());
     debug!("  Content ID: {:08X}\n", cia.content_id);
     debug!("  Format version: {}\n", header.formatversion);
 
@@ -351,7 +352,7 @@ fn parse_ncch(cia: &mut CiaReader, offs: u64, mut titleid: [u8; 8]) {
     let mut encrypted: bool = true;
 
     if flag_to_bool(header.flags[7] & 1) {
-        if flag_to_bool(header.titleid[3] & 16) { fixed_crypto = 2 } else { fixed_crypto = 1 }
+        if flag_to_bool(tid[3] & 16) { fixed_crypto = 2 } else { fixed_crypto = 1 }
         debug!("  Uses fixed-key crypto")
     }
 
