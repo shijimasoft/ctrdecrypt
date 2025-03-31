@@ -333,10 +333,12 @@ fn parse_ncch(cia: &mut CiaReader, offs: u64, mut titleid: [u8; 8]) {
     }
 
     let ncch_key_y = BigEndian::read_u128(header.signature[0..16].try_into().unwrap());
+    let mut tid: [u8; 8] = header.titleid;
+    tid.reverse();
 
     debug!("  Product code: {}", std::str::from_utf8(&header.productcode).unwrap());
     debug!("  KeyY: {:032X}", ncch_key_y);
-    debug!("  Title ID: {}", hex::encode(titleid).to_uppercase());
+    debug!("  Title ID: {}", hex::encode(tid).to_uppercase());
     debug!("  Content ID: {:08X}\n", cia.content_id);
     debug!("  Format version: {}\n", header.formatversion);
 
@@ -350,7 +352,7 @@ fn parse_ncch(cia: &mut CiaReader, offs: u64, mut titleid: [u8; 8]) {
     let mut encrypted: bool = true;
 
     if flag_to_bool(header.flags[7] & 1) {
-        if flag_to_bool(titleid[3] & 16) { fixed_crypto = 2 } else { fixed_crypto = 1 }
+        if flag_to_bool(tid[3] & 16) { fixed_crypto = 2 } else { fixed_crypto = 1 }
         debug!("  Uses fixed-key crypto")
     }
 
