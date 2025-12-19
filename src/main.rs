@@ -8,6 +8,7 @@ use std::{collections::HashMap, fs::canonicalize, fs::File, io::{Cursor, Read, S
 
 use hex_literal::hex;
 use log::{debug, info, LevelFilter};
+use image::{ImageBuffer, Rgb};
 
 const CMNKEYS: [[u8; 16]; 6] = [
     hex!("64c5fd55dd3ad988325baaec5243db98"),
@@ -60,6 +61,34 @@ fn flag_to_bool(flag: u8) -> bool {
     }
 }
 
+fn decode_tiled_icon(data: &[u8], width: u32, height: u32) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+    let mut img = ImageBuffer::new(width, height);
+
+    let tiles_per_row = width / 8;
+
+    for tile_y in (0..height).step_by(8) {
+        for tile_x in (0..width).step_by(8) {
+            let tile_idx = (tile_y / 8) * tiles_per_row + (tile_x / 8);
+            let tile_offset = (tile_idx * 128) as usize; // 64 pixels * 2 bytes
+
+            for py in 0..8 {
+                for px in 0..8 {
+                    let morton_idx = ctrutils::morton_encode_2d(px, py) as usize;
+                    let byte_offset = tile_offset + (morton_idx << 1); // morton_idx * 2
+
+                    let pixel_rgb565 = LittleEndian::read_u16(&data[byte_offset..]);
+                    let (r, g, b) = ctrutils::rgb565_to_rgb888(pixel_rgb565);
+
+                    img.put_pixel(tile_x + px, tile_y + py, Rgb([r, g, b]));
+                }
+            }
+        }
+    }
+
+    img
+}
+
+
 fn get_ncch_aes_counter(hdr: &NcchHdr, section: NcchSection) -> [u8; 16] {
     let mut counter: [u8; 16] = [0; 16];
     if hdr.formatversion == 2 || hdr.formatversion == 0 {
@@ -67,7 +96,7 @@ fn get_ncch_aes_counter(hdr: &NcchHdr, section: NcchSection) -> [u8; 16] {
         titleid.reverse();
         counter[0..8].copy_from_slice(&titleid);
         counter[8] = section as u8;
-    
+
     } else if hdr.formatversion == 1 {
         let x = match section {
             NcchSection::ExHeader => 512,
@@ -97,7 +126,7 @@ fn scramblekey(key_x: u128, key_y: u128) -> u128 {
     rol(value, 87)
 }
 
-fn dump_section(ncch: &mut File, cia: &mut CiaReader, offset: u64, size: u32, sec_type: NcchSection, sec_idx: usize, ctr: [u8; 16], uses_extra_crypto: u8, fixed_crypto: u8, use_seed_crypto: bool, encrypted: bool, keyys: [u128; 2]) {
+fn dump_section(ncch: &mut File, cia: &mut CiaReader, offset: u64, size: u32, sec_type: NcchSection, sec_idx: usize, ctr: [u8; 16], uses_extra_crypto: u8, fixed_crypto: u8, use_seed_crypto: bool, encrypted: bool, keyys: [u128; 2], titleid: [u8; 8], icons: bool) {
     let sections = ["ExHeader", "ExeFS", "RomFS"];
     const CHUNK: u32 = 4194304; // 4 MiB
     debug!("  {} offset: {:08X}", sections[sec_idx], offset);
@@ -126,7 +155,7 @@ fn dump_section(ncch: &mut File, cia: &mut CiaReader, offset: u64, size: u32, se
             ncch.write_all(&buf).unwrap();
             sizeleft -= CHUNK;
         }
-        
+
         if sizeleft > 0 {
             buf = vec![0u8; sizeleft as usize];
             cia.read(&mut buf);
@@ -159,29 +188,89 @@ fn dump_section(ncch: &mut File, cia: &mut CiaReader, offset: u64, size: u32, se
             let mut exedata = vec![0u8; size as usize];
             cia.read(&mut exedata);
             let mut exetmp = exedata.clone();
+
             Aes128Ctr::new_from_slices(&key, &ctr)
                 .unwrap()
                 .apply_keystream(&mut exetmp);
 
+            // ASCII for 'icon'
+            let icon: [u8; 4] = hex!("69636f6e");
+            // ASCII for 'banner'
+            let banner: [u8; 6] = hex!("62616e6e6572");
+
+            let path = Path::new(&cia.name);
+            let parent_dir = path.canonicalize()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .to_path_buf();
+
+            #[repr(C)]
+            struct ExeInfo {
+                fname: [u8; 8],
+                off: [u8; 4],
+                size: [u8; 4],
+            }
+
+            if icons {
+                for i in 0usize..10 {
+                    let exebytes = &exetmp[i * 16..(i + 1) * 16];
+                    let exeinfo: ExeInfo = unsafe { std::mem::transmute(LittleEndian::read_u128(exebytes)) };
+
+                    let mut off = LittleEndian::read_u32(&exeinfo.off) as usize;
+                    let size = LittleEndian::read_u32(&exeinfo.size) as usize;
+                    off += 512;
+
+                    match exeinfo.fname.iter().rposition(|&x| x != 0) {
+                        Some(zero_idx) => {
+                            if exeinfo.fname[..=zero_idx] == icon {
+                                if size >= 0x36C0 {
+                                    let icon_data = &exetmp[off..off + size];
+
+                                    // SMDH magic check
+                                    if &icon_data[0..4] == b"SMDH" {
+
+                                        let icon_24x24_offset = 0x2040;
+                                        let icon_24x24_size = 0x480;
+
+                                        let icon_48x48_offset = 0x24C0;
+                                        let icon_48x48_size = 0x1200;
+
+                                        if icon_data.len() >= icon_24x24_offset + icon_24x24_size {
+                                            let icon_24x24_rgb565 = &icon_data[icon_24x24_offset..icon_24x24_offset + icon_24x24_size];
+                                            // TODO: decode_tiled_icon
+                                            let icon_24x24_png = decode_tiled_icon(icon_24x24_rgb565, 24, 24);
+
+                                            icon_24x24_png.save(format!("{}/{}_icon_24x24.png", parent_dir.display(), hex::encode(titleid).to_uppercase())).unwrap();
+                                        }
+
+                                        if icon_data.len() >= icon_48x48_offset + icon_48x48_size {
+                                            let icon_48x48_rgb565 = &icon_data[icon_48x48_offset..icon_48x48_offset + icon_48x48_size];
+                                            let icon_48x48_img = decode_tiled_icon(icon_48x48_rgb565, 48, 48);
+
+                                            icon_48x48_img.save(format!("{}/{}_icon_48x48.png", parent_dir.display(), hex::encode(titleid).to_uppercase())).unwrap();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        None => (),
+                    }
+                }
+            }
+
             if flag_to_bool(uses_extra_crypto) || use_seed_crypto {
                 let mut exetmp2 = exedata;
                 key = u128::to_be_bytes(scramblekey(KEYS_0[get_crypto_key(&uses_extra_crypto)], keyys[1]));
-                
+
                 Aes128Ctr::new_from_slices(&key, &ctr)
                     .unwrap()
                     .apply_keystream(&mut exetmp2);
 
-                #[repr(C)]
-                struct ExeInfo {
-                    fname: [u8; 8],
-                    off: [u8; 4],
-                    size: [u8; 4],
-                }
-
                 for i in 0usize..10 {
                     let exebytes = &exetmp[i * 16..(i + 1) * 16];
                     let exeinfo: ExeInfo = unsafe { std::mem::transmute(LittleEndian::read_u128(exebytes)) };
-                    
+
                     let mut off = LittleEndian::read_u32(&exeinfo.off) as usize;
                     let size = LittleEndian::read_u32(&exeinfo.size) as usize;
                     off += 512;
@@ -189,11 +278,6 @@ fn dump_section(ncch: &mut File, cia: &mut CiaReader, offset: u64, size: u32, se
                     match exeinfo.fname.iter().rposition(|&x| x != 0) {
                         Some(zero_idx) => if exeinfo.fname[..=zero_idx].is_ascii()
                         {
-                            // ASCII for 'icon'
-                            let icon: [u8; 4] = hex!("69636f6e");
-                            // ASCII for 'banner'
-                            let banner: [u8; 6] = hex!("62616e6e6572");
-
                             if !(exeinfo.fname[..=zero_idx] == icon || exeinfo.fname[..=zero_idx] == banner) {
                                 exetmp.splice(off..(off + size), exetmp2[off..off + size].iter().cloned());
                             }
@@ -202,6 +286,7 @@ fn dump_section(ncch: &mut File, cia: &mut CiaReader, offset: u64, size: u32, se
                     }
                 }
             }
+
             ncch.write_all(&exetmp).unwrap();
         }
         NcchSection::RomFS => {
@@ -247,7 +332,7 @@ fn get_new_key(key_y: u128, header: &NcchHdr, titleid: String) -> u128 {
             seeddb.read_exact(&mut cbuffer).unwrap();
             let seed_count = LittleEndian::read_u32(&cbuffer);
             seeddb.seek(SeekFrom::Current(12)).unwrap();
-            
+
             for _ in 0..seed_count {
                 seeddb.read_exact(&mut kbuffer).unwrap();
                 kbuffer.reverse();
@@ -271,7 +356,7 @@ fn get_new_key(key_y: u128, header: &NcchHdr, titleid: String) -> u128 {
                 let bytes = req.bytes().unwrap();
 
                 match bytes.try_into() {
-                    Ok(bytes) => { 
+                    Ok(bytes) => {
                         seeds.insert(titleid.clone(), bytes);
                         debug!("A seed has been found online in the region {}", country);
                         break;
@@ -297,7 +382,7 @@ fn get_new_key(key_y: u128, header: &NcchHdr, titleid: String) -> u128 {
     new_key
 }
 
-fn parse_ncsd(cia: &mut CiaReader) {
+fn parse_ncsd(cia: &mut CiaReader, icons: bool) {
     debug!("Parsing NCSD in file: {}", cia.name);
     cia.seek(0);
     let mut tmp: [u8; 512] = [0u8; 512];
@@ -309,12 +394,12 @@ fn parse_ncsd(cia: &mut CiaReader) {
             cia.content_id = idx as u32;
             let mut tid: [u8; 8] = header.titleid;
             tid.reverse();
-            parse_ncch(cia, (header.offset_sizetable[idx].offset * MEDIA_UNIT_SIZE).clone().into(), tid);
+            parse_ncch(cia, (header.offset_sizetable[idx].offset * MEDIA_UNIT_SIZE).clone().into(), tid, icons);
         }
     }
 }
 
-fn parse_ncch(cia: &mut CiaReader, offs: u64, mut titleid: [u8; 8]) {
+fn parse_ncch(cia: &mut CiaReader, offs: u64, mut titleid: [u8; 8], icons: bool) {
     if cia.from_ncsd {
         debug!("  Parsing {} NCCH", NCSD_PARTITIONS[cia.cidx as usize]);
     } else if cia.single_ncch {
@@ -379,13 +464,12 @@ fn parse_ncch(cia: &mut CiaReader, offs: u64, mut titleid: [u8; 8]) {
         base = file_name.strip_suffix(".cia").unwrap().to_string();
     }
 
-    let absolute_path = canonicalize(&path).unwrap();
-    let final_path = if cfg!(windows) && absolute_path.to_string_lossy().starts_with(r"\\?\") {
-        Path::new(&absolute_path.to_string_lossy()[4..].replace("\\", "/")).to_path_buf()
-    } else {
-        absolute_path
-    };
-    let parent_dir = final_path.parent().unwrap();
+    let path = Path::new(&cia.name);
+    let parent_dir = path.canonicalize()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
 
     base = format!("{}/{}.{}.{:08X}.ncch",
             parent_dir.display(),
@@ -401,23 +485,23 @@ fn parse_ncch(cia: &mut CiaReader, offs: u64, mut titleid: [u8; 8]) {
     let mut counter: [u8; 16];
     if header.exhdrsize != 0 {
         counter = get_ncch_aes_counter(&header, NcchSection::ExHeader);
-        dump_section(&mut ncch, cia, 512, header.exhdrsize * 2, NcchSection::ExHeader, 0, counter, uses_extra_crypto, fixed_crypto, use_seed_crypto, encrypted, [ncch_key_y, key_y]);
+        dump_section(&mut ncch, cia, 512, header.exhdrsize * 2, NcchSection::ExHeader, 0, counter, uses_extra_crypto, fixed_crypto, use_seed_crypto, encrypted, [ncch_key_y, key_y], tid, icons);
     }
 
     if header.exefssize != 0 {
         counter = get_ncch_aes_counter(&header, NcchSection::ExeFS);
-        dump_section(&mut ncch, cia, (header.exefsoffset * MEDIA_UNIT_SIZE) as u64, header.exefssize * MEDIA_UNIT_SIZE, NcchSection::ExeFS, 1, counter, uses_extra_crypto, fixed_crypto, use_seed_crypto, encrypted, [ncch_key_y, key_y]);
+        dump_section(&mut ncch, cia, (header.exefsoffset * MEDIA_UNIT_SIZE) as u64, header.exefssize * MEDIA_UNIT_SIZE, NcchSection::ExeFS, 1, counter, uses_extra_crypto, fixed_crypto, use_seed_crypto, encrypted, [ncch_key_y, key_y], tid, icons);
     }
 
     if header.romfssize != 0 {
         counter = get_ncch_aes_counter(&header, NcchSection::RomFS);
-        dump_section(&mut ncch, cia, (header.romfsoffset * MEDIA_UNIT_SIZE) as u64, header.romfssize * MEDIA_UNIT_SIZE, NcchSection::RomFS, 2, counter, uses_extra_crypto, fixed_crypto, use_seed_crypto, encrypted, [ncch_key_y, key_y]);
+        dump_section(&mut ncch, cia, (header.romfsoffset * MEDIA_UNIT_SIZE) as u64, header.romfssize * MEDIA_UNIT_SIZE, NcchSection::RomFS, 2, counter, uses_extra_crypto, fixed_crypto, use_seed_crypto, encrypted, [ncch_key_y, key_y], tid, icons);
     }
-    
+
     info!("{}", base);
 }
 
-fn parse_cia(mut romfile: File, filename: String, partition: Option<u8>) {
+fn parse_cia(mut romfile: File, filename: String, partition: Option<u8>, icons: Option<bool>) {
     romfile.seek(SeekFrom::Start(0)).unwrap();
     let mut tmp: [u8; 32] = [0; 32];
     romfile.read_exact(&mut tmp).unwrap();
@@ -468,12 +552,12 @@ fn parse_cia(mut romfile: File, filename: String, partition: Option<u8>) {
         let cenc: bool = (content.ctype & 1) != 0;
 
         romfile.seek(SeekFrom::Start((contentoffs + next_content_offs) as u64)).unwrap();
-        let mut test: [u8; 512] = [0; 512]; 
+        let mut test: [u8; 512] = [0; 512];
         romfile.read_exact(&mut test).unwrap();
         let mut search: [u8; 4] = test[256..260].try_into().unwrap();
 
         let iv: [u8; 16] = gen_iv(content.cidx);
-        
+
         if cenc {
             cbc_decrypt(&titkey, &iv, &mut test);
             search = test[256..260].try_into().unwrap();
@@ -490,7 +574,7 @@ fn parse_cia(mut romfile: File, filename: String, partition: Option<u8>) {
                     Some(number) => if (i as u8) != number { continue; },
                     None => (),
                 }
-                parse_ncch(&mut cia_handle, 0, tid[0..8].try_into().unwrap());
+                parse_ncch(&mut cia_handle, 0, tid[0..8].try_into().unwrap(), icons.unwrap_or(false));
 
             } else { debug!("CIA content can't be parsed, skipping partition") }
             Err(_) => debug!("CIA content can't be parsed, skipping partition")
@@ -502,10 +586,11 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     let mut partition: Option<u8> = None;
+    let mut icons: Option<bool> = None;
     let mut verbose = true;
 
     if args.len() < 2 {
-        println!("Usage: ctrdecrypt <ROMFILE> [OPTIONS]\nOptions:\n\t--ncch <partition-number>\n\t--no-verbose");
+        println!("Usage: ctrdecrypt <ROMFILE> [OPTIONS]\nOptions:\n\t--ncch <partition-number>\n\t--no-verbose\n\t--extract-icons");
         return;
     }
 
@@ -531,6 +616,7 @@ fn main() {
                 i += 1; // Partition number already checked
             }
             "--no-verbose" => verbose = false,
+            "--extract-icons" => icons = Some(true),
             _ => {
                 println!("Invalid argument: {}", args[i]);
                 return;
@@ -553,11 +639,11 @@ fn main() {
         Ok(ptype) => {
             if ptype == "NCSD" {
                 let mut reader = CiaReader::new(rom.try_clone().unwrap(), false, args[1].to_string(), [0u8; 16], 0, 0, 0, false, true);
-                parse_ncsd(&mut reader);
+                parse_ncsd(&mut reader, icons.unwrap_or(false));
                 return;
             } else if ptype == "NCCH" {
                 let mut reader = CiaReader::new(rom.try_clone().unwrap(), false, args[1].to_string(), [0u8; 16], 0, 0, 0, true, false);
-                parse_ncch(&mut reader, 0, [0u8; 8]);
+                parse_ncch(&mut reader, 0, [0u8; 8], icons.unwrap_or(false));
                 return;
             }
         }
@@ -568,6 +654,6 @@ fn main() {
         let mut check: [u8; 4] = [0; 4];
         rom.read_exact(&mut check).unwrap();
 
-        if check[2..4] == [0, 0] { parse_cia(rom, args[1].to_string(), partition) }
+        if check[2..4] == [0, 0] { parse_cia(rom, args[1].to_string(), partition, icons) }
     }
 }

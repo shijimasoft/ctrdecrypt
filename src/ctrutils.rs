@@ -144,11 +144,37 @@ impl CiaReader {
             let last_enc_block = BigEndian::read_u128(&data[(data.len() - 16)..]);
             cbc_decrypt(&self.key, &self.iv, data);
             let first_dec_block = BigEndian::read_u128(&data[0..16]);
-            
+
             // XOR the last encrypted block with the first decrypted block
             BigEndian::write_u128(&mut data[0..16], first_dec_block ^ self.last_enc_block);
 
             self.last_enc_block = last_enc_block;
         }
     }
+}
+
+// Morton encoding
+fn part_1_by_1(mut x: u32) -> u32 {
+    x &= 0x0000_FFFF;
+    x = (x | (x << 8)) & 0x00FF_00FF;
+    x = (x | (x << 4)) & 0x0F0F_0F0F;
+    x = (x | (x << 2)) & 0x3333_3333;
+    x = (x | (x << 1)) & 0x5555_5555;
+    x
+}
+
+pub fn morton_encode_2d(x: u32, y: u32) -> u32 {
+    part_1_by_1(x) | (part_1_by_1(y) << 1)
+}
+
+pub fn rgb565_to_rgb888(rgb565: u16) -> (u8, u8, u8) {
+    let r = ((rgb565 >> 11) & 0x1F) as u8;
+    let g = ((rgb565 >> 5) & 0x3F) as u8;
+    let b = (rgb565 & 0x1F) as u8;
+
+    (
+        (r << 3) | (r >> 2),
+        (g << 2) | (g >> 4),
+        (b << 3) | (b >> 2),
+    )
 }
