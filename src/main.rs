@@ -4,7 +4,7 @@ use ctrutils::{cbc_decrypt, gen_iv, CiaContent, CiaFile, CiaReader, NcchHdr, Ncs
 use byteorder::{ByteOrder, BigEndian, LittleEndian, ReadBytesExt};
 use aes::{cipher::{KeyIvInit, StreamCipher}, Aes128};
 
-use std::{collections::HashMap, fs::canonicalize, fs::File, io::{Cursor, Read, Seek, SeekFrom, Write}, path::Path, usize, vec};
+use std::{collections::HashMap, fs::File, io::{Cursor, Read, Seek, SeekFrom, Write}, path::Path, usize, vec};
 
 use hex_literal::hex;
 use log::{debug, info, LevelFilter};
